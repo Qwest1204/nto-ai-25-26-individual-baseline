@@ -36,7 +36,7 @@ TEMPORAL_SPLIT_RATIO = 0.8
 EARLY_STOPPING_ROUNDS = 50
 MODEL_FILENAME_PATTERN = "lgb_fold_{fold}.txt"  # Deprecated: kept for backwards compatibility
 MODEL_FILENAME = "lgb_model.txt"  # Single model filename for temporal split
-
+NOMIC_MODEL_NAME = 'nomic-ai/nomic-embed-text-v1.5'
 # --- TF-IDF PARAMETERS ---
 TFIDF_MAX_FEATURES = 500
 TFIDF_MIN_DF = 2
@@ -44,13 +44,12 @@ TFIDF_MAX_DF = 0.95
 TFIDF_NGRAM_RANGE = (1, 2)
 
 # --- BERT PARAMETERS ---
-BERT_MODEL_NAME = constants.BERT_MODEL_NAME
-BERT_BATCH_SIZE = 8
-BERT_MAX_LENGTH = 512
-BERT_EMBEDDING_DIM = 768
-BERT_DEVICE = "cuda" if torch and torch.cuda.is_available() else "cpu"
+NOMIC_BATCH_SIZE = 8
+NOMIC_MAX_LENGTH = 512
+NOMIC_EMBEDDING_DIM = 768
+NOMIC_DEVICE = "cuda" if torch and torch.cuda.is_available() else "cpu"
 # Limit GPU memory usage to 50% to prevent overheating and OOM errors
-BERT_GPU_MEMORY_FRACTION = 0.75
+NOMIC_GPU_MEMORY_FRACTION = 0.75
 
 
 # --- FEATURES ---
