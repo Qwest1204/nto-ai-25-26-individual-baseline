@@ -152,6 +152,86 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     return df_with_tfidf
 
 
+def add_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
+    """Adds Nomic embeddings for authors by averaging embeddings of their books' descriptions.
+
+    Computes embeddings per author from train data only to avoid leakage.
+
+    Args:
+        df (pd.DataFrame): The main DataFrame to add features to.
+        train_df (pd.DataFrame): The training portion for computing author embeddings.
+        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
+
+    Returns:
+        pd.DataFrame: The DataFrame with author embedding features added.
+    """
+    print("Adding author embedding features (Nomic)...")
+
+    # Ensure model directory exists
+    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    author_embeddings_path = config.MODEL_DIR / "author_nomic_embeddings.pkl"
+
+    # Merge book data to get author_id per book (assuming df has author_id and book_id)
+    book_author_map = df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]].drop_duplicates()
+    descriptions_with_author = descriptions_df.merge(book_author_map, on=constants.COL_BOOK_ID, how="left")
+
+    # Filter to train books only
+    train_books = train_df[constants.COL_BOOK_ID].unique()
+    train_descriptions = descriptions_with_author[
+        descriptions_with_author[constants.COL_BOOK_ID].isin(train_books)].copy()
+    train_descriptions[constants.COL_DESCRIPTION] = train_descriptions[constants.COL_DESCRIPTION].fillna("")
+
+    # Check if author embeddings already exist (for prediction)
+    if author_embeddings_path.exists():
+        print(f"Loading existing author embeddings from {author_embeddings_path}")
+        author_embeddings_dict = joblib.load(author_embeddings_path)
+    else:
+        # Load Nomic model
+        model = SentenceTransformer(config.NOMIC_MODEL_NAME)
+
+        # Group descriptions by author_id and concatenate them (or average later)
+        author_descriptions = train_descriptions.groupby(constants.COL_AUTHOR_ID)[constants.COL_DESCRIPTION].apply(
+            lambda x: ' '.join(x)).reset_index()
+
+        # Generate embeddings in batches
+        batch_size = config.NOMIC_BATCH_SIZE
+        author_embeddings_list = []
+        for i in tqdm(range(0, len(author_descriptions), batch_size), desc="Generating author embeddings"):
+            batch = author_descriptions[constants.COL_DESCRIPTION].iloc[i:i + batch_size].tolist()
+            batch_embeddings = model.encode(batch, show_progress_bar=False)
+            author_embeddings_list.extend(batch_embeddings)
+
+        # Create dict: author_id -> embedding
+        author_embeddings_dict = dict(
+            zip(author_descriptions[constants.COL_AUTHOR_ID], author_embeddings_list, strict=False))
+
+        # Save for prediction
+        joblib.dump(author_embeddings_dict, author_embeddings_path)
+        print(f"Author embeddings saved to {author_embeddings_path}")
+
+    # Map author embeddings to df
+    df_author_ids = df[constants.COL_AUTHOR_ID].unique()
+    author_embeddings_array = []
+    for author_id in df[constants.COL_AUTHOR_ID]:
+        if author_id in author_embeddings_dict:
+            author_embeddings_array.append(author_embeddings_dict[author_id])
+        else:
+            # Zero embedding for unseen authors
+            author_embeddings_array.append(np.zeros(config.NOMIC_EMBEDDING_DIM))
+
+    author_embeddings_array = np.array(author_embeddings_array)
+
+    # Create DataFrame with author features
+    author_feature_names = [f"author_nomic_{i}" for i in range(config.NOMIC_EMBEDDING_DIM)]
+    author_df = pd.DataFrame(author_embeddings_array, columns=author_feature_names, index=df.index)
+
+    # Concatenate with main DataFrame
+    df_with_author = pd.concat([df.reset_index(drop=True), author_df.reset_index(drop=True)], axis=1)
+
+    print(f"Added {len(author_feature_names)} author Nomic features.")
+    return df_with_author
+
+
 def add_bert_features(df: pd.DataFrame, _train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
     """Adds Nomic embeddings from book descriptions.
     Extracts 768-dimensional embeddings using a pre-trained Nomic model.
@@ -368,6 +448,7 @@ def create_features(
     df = add_genre_features(df, book_genres_df)
     df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
+    df = add_author_embeddings(df, train_df, descriptions_df)  # NEW: Add author embeddings
     df = handle_missing_values(df, train_df)
 
     # Convert categorical columns to pandas 'category' dtype for LightGBM
