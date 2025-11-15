@@ -187,7 +187,7 @@ def add_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, descriptions
         author_embeddings_dict = joblib.load(author_embeddings_path)
     else:
         # Load Nomic model
-        model = SentenceTransformer(config.NOMIC_MODEL_NAME)
+        model = SentenceTransformer(config.NOMIC_MODEL_NAME, trust_remote_code=True)
 
         # Group descriptions by author_id and concatenate them (or average later)
         author_descriptions = train_descriptions.groupby(constants.COL_AUTHOR_ID)[constants.COL_DESCRIPTION].apply(
@@ -198,7 +198,7 @@ def add_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, descriptions
         author_embeddings_list = []
         for i in tqdm(range(0, len(author_descriptions), batch_size), desc="Generating author embeddings"):
             batch = author_descriptions[constants.COL_DESCRIPTION].iloc[i:i + batch_size].tolist()
-            batch_embeddings = model.encode(batch, show_progress_bar=False)
+            batch_embeddings = model.encode(batch)
             author_embeddings_list.extend(batch_embeddings)
 
         # Create dict: author_id -> embedding
@@ -265,8 +265,8 @@ def add_bert_features(df: pd.DataFrame, _train_df: pd.DataFrame, descriptions_df
             print(f"GPU memory limited to {config.NOMIC_GPU_MEMORY_FRACTION * 100:.0f}% of available memory")
 
         # Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(config.NOMIC_MODEL_NAME)
-        model = AutoModel.from_pretrained(config.NOMIC_MODEL_NAME)
+        tokenizer = AutoTokenizer.from_pretrained(config.NOMIC_MODEL_NAME, trust_remote_code=True)
+        model = AutoModel.from_pretrained(config.NOMIC_MODEL_NAME, trust_remote_code=True)
         model.to(config.NOMIC_DEVICE)
         model.eval()
 
