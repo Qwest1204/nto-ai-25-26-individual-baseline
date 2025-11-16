@@ -44,7 +44,7 @@ TFIDF_MAX_DF = 0.95
 TFIDF_NGRAM_RANGE = (1, 2)
 
 # --- BERT PARAMETERS ---
-NOMIC_BATCH_SIZE = 8
+NOMIC_BATCH_SIZE = 16
 NOMIC_MAX_LENGTH = 512
 NOMIC_EMBEDDING_DIM = 768
 NOMIC_DEVICE = "cuda" if torch and torch.cuda.is_available() else "cpu"
