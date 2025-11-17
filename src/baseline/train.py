@@ -1,3 +1,5 @@
+# train.py (полный код с улучшениями)
+
 # src/baseline/train.py (updated — replace your file with this)
 
 """
@@ -16,7 +18,7 @@ import torch  # Added import for torch.cuda.is_available()
 from torch.utils.data import DataLoader
 
 from . import config, constants
-from .features import add_target_encoding_and_interactions, handle_missing_values
+from .features import add_target_encoding_and_interactions, handle_missing_values, feature_selection
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 from .nn_model import train_ft_transformer, FTTransformer, prepare_data_for_nn, RatingDataset
 
@@ -99,9 +101,9 @@ def train() -> None:
     features = [f for f in features if train_split_final[f].dtype != 'object']
 
     X_train = train_split_final[features]
-    y_train = train_split_final[config.TARGET]
+    y_train = train_split_final[config.TARGET].clip(0, 10)
     X_val = val_split_final[features]
-    y_val = val_split_final[config.TARGET]
+    y_val = val_split_final[config.TARGET].clip(0, 10)
 
     cat_features = [col for col in config.CAT_FEATURES if col in features]
 
@@ -112,13 +114,13 @@ def train() -> None:
 
     print(f"\nTraining CatBoost on {len(features)} features ({len(cat_features)} categorical)...")
     model = CatBoostRegressor(
-        iterations=5000,
-        learning_rate=0.03,
-        depth=10,
-        l2_leaf_reg=3,
+        iterations=7000,
+        learning_rate=0.05,
+        depth=8,
+        l2_leaf_reg=5,
         random_seed=42,
         verbose=100,
-        early_stopping_rounds=200,
+        early_stopping_rounds=300,
         task_type="GPU" if torch.cuda.is_available() else "CPU",
         devices='0' if torch.cuda.is_available() else None
     )
@@ -128,17 +130,35 @@ def train() -> None:
 
     model.fit(train_pool, eval_set=val_pool)
 
-    print("\nTraining FT-Transformer...")
-    cat_feats = [col for col in config.CAT_FEATURES if col in features]
-    num_feats = [col for col in features if col not in cat_feats]
+    # Feature selection after CatBoost
+    selected_features = feature_selection(model, features)
+    X_train = X_train[selected_features]
+    X_val = X_val[selected_features]
+    cat_features = [col for col in cat_features if col in selected_features]
 
-    train_ft_transformer(train_split_final[features], train_split_final[config.TARGET],
-                         val_split_final[features], val_split_final[config.TARGET],
+    # Train LightGBM
+    print("\nTraining LightGBM...")
+    lgb_train = lgb.Dataset(X_train, y_train, categorical_feature=cat_features)
+    lgb_val = lgb.Dataset(X_val, y_val, categorical_feature=cat_features)
+    lgb_model = lgb.train(
+        config.LGB_PARAMS,
+        lgb_train,
+        valid_sets=[lgb_val],
+        callbacks=[lgb.early_stopping(stopping_rounds=300)],
+    )
+
+    print("\nTraining FT-Transformer...")
+    cat_feats = [col for col in config.CAT_FEATURES if col in selected_features]
+    num_feats = [col for col in selected_features if col not in cat_feats]
+
+    train_ft_transformer(train_split_final[selected_features], train_split_final[config.TARGET],
+                         val_split_final[selected_features], val_split_final[config.TARGET],
                          cat_feats, num_feats)
 
     # === ENSEMBLE EVALUATION ON VALIDATION ===
     print("\nEvaluating ensemble on validation split...")
     cat_val_preds = model.predict(X_val)
+    lgb_val_preds = lgb_model.predict(X_val)
 
     ft_state = torch.load(config.MODEL_DIR / 'ft_transformer.pt', weights_only=False)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -158,20 +178,25 @@ def train() -> None:
             ft_val_preds.append(ft_model(x_num, x_cat).cpu().numpy())
     ft_val_preds = np.concatenate(ft_val_preds)
 
-    ensemble_val_preds = 0.6 * cat_val_preds + 0.4 * ft_val_preds
+    ensemble_val_preds = 0.5 * cat_val_preds + 0.3 * ft_val_preds + 0.2 * lgb_val_preds
     ensemble_rmse = np.sqrt(mean_squared_error(y_val, ensemble_val_preds))
     print(f"\nEnsemble Val RMSE: {ensemble_rmse:.4f}")
 
-    # Evaluation (CatBoost only)
+    # Evaluation (CatBoost only for reference)
     val_preds = model.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, val_preds))
     mae = mean_absolute_error(y_val, val_preds)
-    print(f"\nValidation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    print(f"\nCatBoost Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
 
-    # Save
+    # Save models
     model_path = config.MODEL_DIR / "catboost_model.cbm"
     model.save_model(str(model_path))
     print(f"CatBoost model saved to {model_path}")
+
+    lgb_model.save_model(str(config.MODEL_DIR / "lightgbm_model.txt"))
+    print(f"LightGBM model saved to {config.MODEL_DIR / 'lightgbm_model.txt'}")
+
+    # FT saved in train_ft_transformer
 
 
 if __name__ == "__main__":
