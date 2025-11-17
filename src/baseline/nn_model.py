@@ -11,7 +11,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from pathlib import Path
 from typing import Dict, List
 
-from .. import config, constants  # Подтяни из твоего проекта
+import config, constants  # Подтяни из твоего проекта
 
 class FTTransformer(nn.Module):
     def __init__(self, num_features: int, cat_cardinalities: List[int], d_token: int = 256, n_blocks: int = 4, n_heads: int = 8, dropout: float = 0.1):
