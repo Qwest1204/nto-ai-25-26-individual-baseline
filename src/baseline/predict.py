@@ -84,7 +84,33 @@ def predict() -> None:
 
     test_pool = Pool(X_test, cat_features=cat_features)
     test_preds = model.predict(test_pool)
+    ft_path = config.MODEL_DIR / 'ft_transformer.pt'
+    if ft_path.exists():
+        print("Loading FT-Transformer for ensemble...")
+        ft_state = torch.load(ft_path)
+        cat_feats = [col for col in config.CAT_FEATURES if col in X_test.columns]
+        num_feats = [col for col in X_test.columns if col not in cat_feats]
 
+        X_test_num, X_test_cat, _, _, _ = prepare_data_for_nn(test_set_final, cat_feats, num_feats, fit=False,
+                                                              encoders=ft_state['encoders'], scaler=ft_state['scaler'])
+
+        test_ds = RatingDataset(X_test_num, X_test_cat)
+        test_loader = DataLoader(test_ds, batch_size=2048, shuffle=False)
+
+        ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats])
+        ft_model.load_state_dict(ft_state['model'])
+        ft_model.eval()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        ft_model.to(device)
+
+        ft_preds = []
+        with torch.no_grad():
+            for batch in test_loader:
+                x_num, x_cat = [b.to(device) for b in batch]
+                ft_preds.append(ft_model(x_num, x_cat).cpu().numpy())
+        ft_preds = np.concatenate(ft_preds)
+
+        test_preds = 0.6 * test_preds + 0.4 * ft_preds  # Ансамбль!
     # Clip predictions to be within the valid rating range [0, 10]
     clipped_preds = np.clip(test_preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
 

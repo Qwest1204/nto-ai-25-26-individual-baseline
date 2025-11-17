@@ -9,6 +9,7 @@ import lightgbm as lgb
 import numpy as np
 from catboost import CatBoostRegressor, Pool
 import pandas as pd
+from nn_model import train_ft_transformer
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch  # Added import for torch.cuda.is_available()
 
@@ -125,7 +126,36 @@ def train() -> None:
     val_pool = Pool(X_val, y_val, cat_features=cat_features)
 
     model.fit(train_pool, eval_set=val_pool)
+    rint("\nTraining FT-Transformer...")
+    cat_feats = [col for col in config.CAT_FEATURES if col in features]
+    num_feats = [col for col in features if col not in cat_feats]
 
+    train_ft_transformer(train_split_final[features], train_split_final[config.TARGET],
+                         val_split_final[features], val_split_final[config.TARGET],
+                         cat_feats, num_feats)
+
+    # Оцени ансамбль на val (опционально)
+    cat_val_preds = model.predict(X_val)  # CatBoost
+    ft_state = torch.load(config.MODEL_DIR / 'ft_transformer.pt')
+    ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats])
+    ft_model.load_state_dict(ft_state['model'])
+    ft_model.eval()
+
+    X_val_num, X_val_cat, _, _, _ = prepare_data_for_nn(val_split_final, cat_feats, num_feats, fit=False,
+                                                        encoders=ft_state['encoders'], scaler=ft_state['scaler'])
+    val_ds = RatingDataset(X_val_num, X_val_cat)
+    val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False)
+
+    ft_val_preds = []
+    with torch.no_grad():
+        for batch in val_loader:
+            x_num, x_cat = [b.to(device) for b in batch]
+            ft_val_preds.append(ft_model(x_num, x_cat).cpu().numpy())
+    ft_val_preds = np.concatenate(ft_val_preds)
+
+    ensemble_val_preds = 0.6 * cat_val_preds + 0.4 * ft_val_preds  # Весы подбери
+    ensemble_rmse = np.sqrt(mean_squared_error(y_val, ensemble_val_preds))
+    print(f"\nEnsemble Val RMSE: {ensemble_rmse:.4f}")
     # Evaluation
     val_preds = model.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, val_preds))
