@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from . import config, constants
 from .features import handle_missing_values, add_target_encoding_and_interactions
+from .nn_model import FTTransformer, prepare_data_for_nn
 
 
 def predict() -> None:
