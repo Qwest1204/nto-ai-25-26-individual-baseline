@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from . import config, constants
-from .features import add_aggregate_features, handle_missing_values
+from .features import add_aggregate_features, handle_missing_values, add_target_encoding_and_interactions
 
 
 def predict() -> None:
@@ -75,10 +75,9 @@ def predict() -> None:
         )
 
     print(f"\nLoading model from {model_path}...")
-    model = lgb.Booster(model_file=str(model_path))
-
-    # Generate predictions
-    print("Generating predictions...")
+    from catboost import CatBoostRegressor
+    model = CatBoostRegressor()
+    model.load_model(str(model_path))
     test_preds = model.predict(X_test)
 
     # Clip predictions to be within the valid rating range [0, 10]

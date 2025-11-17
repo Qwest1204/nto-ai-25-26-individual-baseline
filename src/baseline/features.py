@@ -327,6 +327,61 @@ def add_book_and_author_embeddings(
     print(f"Added {len(book_cols) + len(author_cols)} Nomic features (book + author).")
     return df
 
+def add_target_encoding_and_interactions(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    print("Adding Target Encoding + Interactions + Rank features...")
+
+    global_mean = train_df[config.TARGET].mean()
+
+    # === 1. Smoothed Target Encoding ===
+    # User
+    user_stats = train_df.groupby(constants.COL_USER_ID)[config.TARGET].agg(['mean', 'count'])
+    user_stats['user_te'] = (user_stats['mean'] * user_stats['count'] + global_mean * 20) / (user_stats['count'] + 20)
+    user_stats['user_ratings_count'] = user_stats['count']
+
+    # Book
+    book_stats = train_df.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(['mean', 'count'])
+    book_stats['book_te'] = (book_stats['mean'] * book_stats['count'] + global_mean * 10) / (book_stats['count'] + 10)
+    book_stats['book_ratings_count'] = book_stats['count']
+
+    # Author
+    author_stats = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(['mean', 'count'])
+    author_stats['author_te'] = (author_stats['mean'] * author_stats['count'] + global_mean * 5) / (author_stats['count'] + 5)
+
+    # Merge
+    df = df.merge(user_stats[['user_te', 'user_ratings_count']], on=constants.COL_USER_ID, how='left')
+    df = df.merge(book_stats[['book_te', 'book_ratings_count']], on=constants.COL_BOOK_ID, how='left')
+    df = df.merge(author_stats[['author_te']], on=constants.COL_AUTHOR_ID, how='left')
+
+    # Fill missing
+    df['user_te'] = df['user_te'].fillna(global_mean)
+    df['book_te'] = df['book_te'].fillna(global_mean)
+    df['author_te'] = df['author_te'].fillna(global_mean)
+    df['user_ratings_count'] = df['user_ratings_count'].fillna(0)
+    df['book_ratings_count'] = df['book_ratings_count'].fillna(0)
+
+    # === 2. Interaction Features ===
+    df['user_book_te_mult'] = df['user_te'] * df['book_te']
+    df['user_book_te_diff'] = df['user_te'] - df['book_te']
+    df['user_book_count_ratio'] = (df['user_ratings_count'] + 1) / (df['book_ratings_count'] + 1)
+    df['user_author_te'] = df['user_te'] * df['author_te']
+
+    # === 3. Rank Features (временные) ===
+    train_sorted = train_df.sort_values(constants.COL_TIMESTAMP)
+    train_sorted['user_rating_order'] = train_sorted.groupby(constants.COL_USER_ID).cumcount() + 1
+    train_sorted['user_total_ratings'] = train_sorted.groupby(constants.COL_USER_ID)[config.TARGET].transform('count')
+    train_sorted['user_rating_pct'] = train_sorted['user_rating_order'] / train_sorted['user_total_ratings']
+
+    # Merge rank features
+    rank_cols = ['user_rating_pct']
+    df = df.merge(
+        train_sorted[[constants.COL_USER_ID, constants.COL_BOOK_ID] + rank_cols],
+        on=[constants.COL_USER_ID, constants.COL_BOOK_ID],
+        how='left'
+    )
+    df['user_rating_pct'] = df['user_rating_pct'].fillna(0.5)  # среднее положение
+
+    print("Target Encoding + Interactions + Rank features added!")
+    return df
 
 def create_features(
     df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False

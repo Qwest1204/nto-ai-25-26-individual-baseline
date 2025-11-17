@@ -7,11 +7,12 @@ correct validation without data leakage from future timestamps.
 
 import lightgbm as lgb
 import numpy as np
+from catboost import CatBoostRegressor, Pool
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from . import config, constants
-from .features import add_aggregate_features, handle_missing_values
+from .features import add_aggregate_features, handle_missing_values, add_target_encoding_and_interactions
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 
 
@@ -79,68 +80,56 @@ def train() -> None:
         )
     print("✅ Temporal split validation passed: all validation timestamps are after train timestamps")
 
-    # Compute aggregate features on train split only (to prevent data leakage)
-    print("\nComputing aggregate features on train split only...")
-    train_split_with_agg = add_aggregate_features(train_split.copy(), train_split)
-    val_split_with_agg = add_aggregate_features(val_split.copy(), train_split)  # Use train_split for aggregates!
+    # ← ВСТАВЬ ЭТУ СТРОКУ ВМЕСТО add_aggregate_features
+    print("\nComputing advanced features on train split...")
+    train_split_final = add_target_encoding_and_interactions(train_split.copy(), train_split)
+    val_split_final = add_target_encoding_and_interactions(val_split.copy(), train_split)
 
-    # Handle missing values (use train_split for fill values)
-    print("Handling missing values...")
-    train_split_final = handle_missing_values(train_split_with_agg, train_split)
-    val_split_final = handle_missing_values(val_split_with_agg, train_split)
+    # Handle missing values (остаётся)
+    train_split_final = handle_missing_values(train_split_final, train_split)
+    val_split_final = handle_missing_values(val_split_final, train_split)
 
-    # Define features (X) and target (y)
-    # Exclude timestamp, source, target, prediction columns
-    exclude_cols = [
-        constants.COL_SOURCE,
-        config.TARGET,
-        constants.COL_PREDICTION,
-        constants.COL_TIMESTAMP,
-    ]
+    # Features
+    exclude_cols = [constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP]
     features = [col for col in train_split_final.columns if col not in exclude_cols]
-
-    # Exclude any remaining object columns that are not model features
-    non_feature_object_cols = train_split_final[features].select_dtypes(include=["object"]).columns.tolist()
-    features = [f for f in features if f not in non_feature_object_cols]
+    features = [f for f in features if train_split_final[f].dtype != 'object']
 
     X_train = train_split_final[features]
     y_train = train_split_final[config.TARGET]
     X_val = val_split_final[features]
     y_val = val_split_final[config.TARGET]
 
-    print(f"Training features: {len(features)}")
+    # ← CATBOOST!
+    cat_features = [col for col in config.CAT_FEATURES if col in features]
 
-    # Ensure model directory exists
-    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Train single model
-    print("\nTraining LightGBM model...")
-    model = lgb.LGBMRegressor(**config.LGB_PARAMS)
-
-    # Update fit params with early stopping callback
-    fit_params = config.LGB_FIT_PARAMS.copy()
-    fit_params["callbacks"] = [lgb.early_stopping(stopping_rounds=config.EARLY_STOPPING_ROUNDS, verbose=False)]
-
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric=fit_params["eval_metric"],
-        callbacks=fit_params["callbacks"],
+    print(f"\nTraining CatBoost on {len(features)} features ({len(cat_features)} categorical)...")
+    model = CatBoostRegressor(
+        iterations=5000,
+        learning_rate=0.03,
+        depth=10,
+        l2_leaf_reg=3,
+        random_seed=42,
+        verbose=100,
+        early_stopping_rounds=200,
+        task_type="GPU" if torch.cuda.is_available() else "CPU",
+        devices='0' if torch.cuda.is_available() else None
     )
 
-    # Evaluate the model
+    train_pool = Pool(X_train, y_train, cat_features=cat_features)
+    val_pool = Pool(X_val, y_val, cat_features=cat_features)
+
+    model.fit(train_pool, eval_set=val_pool)
+
+    # Evaluation
     val_preds = model.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, val_preds))
     mae = mean_absolute_error(y_val, val_preds)
     print(f"\nValidation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
 
-    # Save the trained model
-    model_path = config.MODEL_DIR / config.MODEL_FILENAME
-    model.booster_.save_model(str(model_path))
-    print(f"Model saved to {model_path}")
-
-    print("\nTraining complete.")
+    # Save
+    model_path = config.MODEL_DIR / "catboost_model.cbm"
+    model.save_model(str(model_path))
+    print(f"CatBoost model saved to {model_path}")
 
 
 if __name__ == "__main__":
