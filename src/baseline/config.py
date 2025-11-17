@@ -46,7 +46,7 @@ TFIDF_NGRAM_RANGE = (1, 2)
 # --- BERT PARAMETERS ---
 NOMIC_BATCH_SIZE = 16
 NOMIC_MAX_LENGTH = 1024
-NOMIC_EMBEDDING_DIM = 300
+NOMIC_EMBEDDING_DIM = 256
 NOMIC_DEVICE = "cuda" if torch and torch.cuda.is_available() else "cpu"
 # Limit GPU memory usage to 50% to prevent overheating and OOM errors
 NOMIC_GPU_MEMORY_FRACTION = 0.75
