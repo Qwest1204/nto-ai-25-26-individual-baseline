@@ -77,7 +77,7 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     return df
 
 
-def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
+def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame, train_df) -> pd.DataFrame:
     """Calculates and adds the count of genres for each book.
 
     Args:
@@ -454,7 +454,7 @@ def create_features(
     if include_aggregates:
         df = add_aggregate_features(df, train_df)
 
-    df = add_genre_features(df, book_genres_df)
+    df = add_genre_features(df, book_genres_df, train_df)
     df = add_text_features(df, train_df, descriptions_df)
     df = add_book_and_author_embeddings(df, train_df, descriptions_df)
     df = add_target_encoding_and_interactions(df, train_df)
