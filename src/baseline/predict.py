@@ -87,7 +87,7 @@ def predict() -> None:
     ft_path = config.MODEL_DIR / 'ft_transformer.pt'
     if ft_path.exists():
         print("Loading FT-Transformer for ensemble...")
-        ft_state = torch.load(ft_path)
+        ft_state = torch.load(ft_path, weights_only=False)
         cat_feats = [col for col in config.CAT_FEATURES if col in X_test.columns]
         num_feats = [col for col in X_test.columns if col not in cat_feats]
 
