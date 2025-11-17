@@ -1,4 +1,4 @@
-# features.py (полный код с улучшениями)
+# features.py (fixed)
 
 """
 Feature engineering script.
@@ -17,6 +17,7 @@ from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cdist
 
 from . import config, constants
+
 
 def _load_nomic_model():
     """Load Nomic model once with optimized settings."""
@@ -77,12 +78,13 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     return df
 
 
-def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame, train_df) -> pd.DataFrame:
+def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """Calculates and adds the count of genres for each book.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
         book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
+        train_df (pd.DataFrame): The training portion for genre mean calculations.
 
     Returns:
         pd.DataFrame: The DataFrame with the new 'book_genres_count' column.
@@ -95,12 +97,14 @@ def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame, train_df)
     ]
 
     # New: Genre mean ratings (target encoding for genres)
-    train_genres = book_genres_df.merge(train_df[[constants.COL_BOOK_ID, config.TARGET]], on=constants.COL_BOOK_ID, how='inner')
+    train_genres = book_genres_df.merge(train_df[[constants.COL_BOOK_ID, config.TARGET]], on=constants.COL_BOOK_ID,
+                                        how='inner')
     genre_mean = train_genres.groupby(constants.COL_GENRE_ID)[config.TARGET].mean().reset_index()
     genre_mean.columns = [constants.COL_GENRE_ID, 'genre_mean_rating']
 
     # Agg genre means per book (mean of genre means)
-    book_genre_means = book_genres_df.merge(genre_mean, on=constants.COL_GENRE_ID).groupby(constants.COL_BOOK_ID)['genre_mean_rating'].mean().reset_index()
+    book_genre_means = book_genres_df.merge(genre_mean, on=constants.COL_GENRE_ID).groupby(constants.COL_BOOK_ID)[
+        'genre_mean_rating'].mean().reset_index()
     book_genre_means.columns = [constants.COL_BOOK_ID, 'book_genre_mean_rating']
 
     df = df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
@@ -171,7 +175,8 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     return df
 
 
-def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
+def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame,
+                                   descriptions_df: pd.DataFrame) -> pd.DataFrame:
     """Adds Nomic embeddings for books and authors.
 
     Fits embeddings on training data only, reduces dimensionality with PCA.
@@ -202,7 +207,8 @@ def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, des
         # Get unique books from train (for fit PCA)
         train_books = train_df[constants.COL_BOOK_ID].unique()
         train_desc = descriptions_df[descriptions_df[constants.COL_BOOK_ID].isin(train_books)].copy()
-        train_desc[constants.COL_DESCRIPTION] = train_desc[constants.COL_DESCRIPTION].fillna("No description available.")
+        train_desc[constants.COL_DESCRIPTION] = train_desc[constants.COL_DESCRIPTION].fillna(
+            "No description available.")
 
         # Compute embeddings in batches
         print("Computing book embeddings on train...")
@@ -242,7 +248,8 @@ def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, des
         author_embeddings_dict = joblib.load(author_emb_path)
     else:
         # Merge author_id to descriptions
-        author_desc = descriptions_df.merge(df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]].drop_duplicates(), on=constants.COL_BOOK_ID)
+        author_desc = descriptions_df.merge(df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]].drop_duplicates(),
+                                            on=constants.COL_BOOK_ID)
 
         unique_authors = author_desc[constants.COL_AUTHOR_ID].unique()
         author_emb_list = []
@@ -289,9 +296,12 @@ def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, des
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     """Extract temporal features from timestamp."""
     if constants.COL_TIMESTAMP in df.columns:
-        df['day_of_week'] = df[constants.COL_TIMESTAMP].dt.dayofweek.astype('category')
-        df['month'] = df[constants.COL_TIMESTAMP].dt.month.astype('category')
+        df['day_of_week'] = df[constants.COL_TIMESTAMP].dt.dayofweek
+        df['month'] = df[constants.COL_TIMESTAMP].dt.month
         df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+
+        df['day_of_week'] = df['day_of_week'].astype('category')
+        df['month'] = df['month'].astype('category')
 
         # Recency: days since user's first rating (approx)
         df['user_first_ts'] = df.groupby(constants.COL_USER_ID)[constants.COL_TIMESTAMP].transform('min')
@@ -339,7 +349,8 @@ def add_target_encoding_and_interactions(df: pd.DataFrame, train_df: pd.DataFram
 
     # Author
     author_stats = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(['mean', 'count'])
-    author_stats['author_te'] = (author_stats['mean'] * author_stats['count'] + global_mean * 5) / (author_stats['count'] + 5)
+    author_stats['author_te'] = (author_stats['mean'] * author_stats['count'] + global_mean * 5) / (
+            author_stats['count'] + 5)
 
     # Merge
     df = df.merge(user_stats[['user_te', 'user_ratings_count']], on=constants.COL_USER_ID, how='left')
