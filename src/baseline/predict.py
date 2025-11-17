@@ -74,10 +74,16 @@ def predict() -> None:
         )
 
     print(f"\nLoading model from {model_path}...")
-    from catboost import CatBoostRegressor
+    from catboost import CatBoostRegressor, Pool
     model = CatBoostRegressor()
     model.load_model(str(model_path))
-    test_preds = model.predict(X_test)
+
+    cat_features = [col for col in config.CAT_FEATURES if col in features]
+    for col in cat_features:
+        X_test[col] = X_test[col].astype(str)
+
+    test_pool = Pool(X_test, cat_features=cat_features)
+    test_preds = model.predict(test_pool)
 
     # Clip predictions to be within the valid rating range [0, 10]
     clipped_preds = np.clip(test_preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
