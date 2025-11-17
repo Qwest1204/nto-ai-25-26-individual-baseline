@@ -225,6 +225,8 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
 
     return df
 
+TARGET_EMBED_DIM = 300  # ← Твоя цель (можно в config.py вынести)
+
 def add_book_and_author_embeddings(
     df: pd.DataFrame,
     train_df: pd.DataFrame,
@@ -233,11 +235,12 @@ def add_book_and_author_embeddings(
     """
     Adds Nomic embeddings for books AND authors in one pass.
     Caches book embeddings → computes author averages from train only.
+    Uses Matryoshka slicing to reduce to TARGET_EMBED_DIM=300.
     """
     print("Adding book and author Nomic embeddings...")
 
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    book_emb_path = config.MODEL_DIR / constants.BERT_EMBEDDINGS_FILENAME
+    book_emb_path = config.MODEL_DIR / constants.BERT_EMBEDDINGS_FILENAME  # bert_embeddings.pkl
     author_emb_path = config.MODEL_DIR / "author_nomic_embeddings.pkl"
 
     # Prepare descriptions
@@ -249,8 +252,17 @@ def add_book_and_author_embeddings(
     if book_emb_path.exists():
         print(f"Loading cached book embeddings from {book_emb_path}")
         book_embeddings_dict = joblib.load(book_emb_path)
+        # Проверка dim: если старый кэш (768), пересчитываем
+        sample_emb = next(iter(book_embeddings_dict.values()))
+        if len(sample_emb) != TARGET_EMBED_DIM:
+            print(f"Old cache dim={len(sample_emb)}, recomputing with {TARGET_EMBED_DIM}...")
+            book_emb_path.unlink()  # Удаляем старый
+            book_embeddings_dict = None
     else:
-        print("Computing book Nomic embeddings...")
+        book_embeddings_dict = None
+
+    if book_embeddings_dict is None:
+        print("Computing book Nomic embeddings (sliced to 300-dim)...")
         model = _load_nomic_model()
 
         book_ids = all_descriptions[constants.COL_BOOK_ID].tolist()
@@ -268,18 +280,29 @@ def add_book_and_author_embeddings(
                 convert_to_numpy=True,
                 normalize_embeddings=False
             )
-            embeddings.extend(batch_emb)
+            # ← КЛЮЧЕВОЕ: Срез для Matryoshka (первые 300 dims)
+            sliced_emb = batch_emb[:, :TARGET_EMBED_DIM]
+            embeddings.extend(sliced_emb)
 
-        book_embeddings_dict = dict(zip(book_ids, embeddings, strict=False))
+        book_embeddings_dict = dict(zip(book_ids, embeddings))
         joblib.dump(book_embeddings_dict, book_emb_path)
-        print(f"Book embeddings saved to {book_emb_path}")
+        print(f"Sliced book embeddings (300-dim) saved to {book_emb_path}")
 
     # === AUTHOR EMBEDDINGS (from train books only) ===
     if author_emb_path.exists():
         print(f"Loading cached author embeddings from {author_emb_path}")
         author_embeddings_dict = joblib.load(author_emb_path)
+        # Аналогично: проверка dim
+        sample_emb = next(iter(author_embeddings_dict.values()))
+        if len(sample_emb) != TARGET_EMBED_DIM:
+            print(f"Old author cache dim={len(sample_emb)}, recomputing...")
+            author_emb_path.unlink()
+            author_embeddings_dict = None
     else:
-        print("Computing author embeddings (train only)...")
+        author_embeddings_dict = None
+
+    if author_embeddings_dict is None:
+        print("Computing author embeddings (train only, 300-dim)...")
         train_books = train_df[constants.COL_BOOK_ID].unique()
         train_desc = all_descriptions[all_descriptions[constants.COL_BOOK_ID].isin(train_books)]
 
@@ -287,7 +310,7 @@ def add_book_and_author_embeddings(
         book_author_map = df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]].drop_duplicates()
         train_desc_with_author = train_desc.merge(book_author_map, on=constants.COL_BOOK_ID, how="left")
 
-        # Group by author and average book embeddings
+        # Group by author and average book embeddings (уже sliced!)
         author_emb_list = []
         author_ids = []
 
@@ -295,36 +318,36 @@ def add_book_and_author_embeddings(
             book_ids_in_group = group[constants.COL_BOOK_ID].tolist()
             valid_embs = [book_embeddings_dict[bid] for bid in book_ids_in_group if bid in book_embeddings_dict]
             if valid_embs:
-                avg_emb = np.mean(valid_embs, axis=0)
+                avg_emb = np.mean(valid_embs, axis=0)  # Среднее на 300-dim
             else:
-                avg_emb = np.zeros(config.NOMIC_EMBEDDING_DIM)
+                avg_emb = np.zeros(TARGET_EMBEDDING_DIM)
             author_emb_list.append(avg_emb)
             author_ids.append(author_id)
 
-        author_embeddings_dict = dict(zip(author_ids, author_emb_list, strict=False))
+        author_embeddings_dict = dict(zip(author_ids, author_emb_list))
         joblib.dump(author_embeddings_dict, author_emb_path)
-        print(f"Author embeddings saved to {author_emb_path}")
+        print(f"Author embeddings (300-dim) saved to {author_emb_path}")
 
-    # === MAP TO DF ===
+    # === MAP TO DF (теперь всё 300-dim) ===
     # Book embeddings
     book_emb_matrix = np.array([
-        book_embeddings_dict.get(bid, np.zeros(config.NOMIC_EMBEDDING_DIM))
+        book_embeddings_dict.get(bid, np.zeros(TARGET_EMBED_DIM))
         for bid in df[constants.COL_BOOK_ID]
     ])
-    book_cols = [f"nomic_book_{i}" for i in range(config.NOMIC_EMBEDDING_DIM)]
+    book_cols = [f"nomic_book_{i}" for i in range(TARGET_EMBED_DIM)]  # ← 300 колонок
     book_df = pd.DataFrame(book_emb_matrix, columns=book_cols, index=df.index)
 
     # Author embeddings
     author_emb_matrix = np.array([
-        author_embeddings_dict.get(aid, np.zeros(config.NOMIC_EMBEDDING_DIM))
+        author_embeddings_dict.get(aid, np.zeros(TARGET_EMBED_DIM))
         for aid in df[constants.COL_AUTHOR_ID]
     ])
-    author_cols = [f"nomic_author_{i}" for i in range(config.NOMIC_EMBEDDING_DIM)]
+    author_cols = [f"nomic_author_{i}" for i in range(TARGET_EMBED_DIM)]  # ← 300 колонок
     author_df = pd.DataFrame(author_emb_matrix, columns=author_cols, index=df.index)
 
     # Concat
     df = pd.concat([df.reset_index(drop=True), book_df, author_df], axis=1)
-    print(f"Added {len(book_cols) + len(author_cols)} Nomic features (book + author).")
+    print(f"Added {len(book_cols) + len(author_cols)} Nomic features (book + author, 300-dim).")
     return df
 
 def add_target_encoding_and_interactions(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
