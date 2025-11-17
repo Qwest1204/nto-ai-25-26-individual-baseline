@@ -5,12 +5,11 @@ Computes aggregate features on all train data and applies them to test set,
 then generates predictions using the trained model.
 """
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
 from . import config, constants
-from .features import add_aggregate_features, handle_missing_values, add_target_encoding_and_interactions
+from .features import handle_missing_values, add_target_encoding_and_interactions
 
 
 def predict() -> None:
@@ -43,13 +42,13 @@ def predict() -> None:
     print(f"Train set: {len(train_set):,} rows")
     print(f"Test set: {len(test_set):,} rows")
 
-    # Compute aggregate features on ALL train data (to use for test predictions)
-    print("\nComputing aggregate features on all train data...")
-    test_set_with_agg = add_aggregate_features(test_set.copy(), train_set)
+    # Compute advanced features on all train data (to use for test predictions)
+    print("\nComputing advanced features on all train data...")
+    test_set_final = add_target_encoding_and_interactions(test_set.copy(), train_set)
 
     # Handle missing values (use train_set for fill values)
     print("Handling missing values...")
-    test_set_final = handle_missing_values(test_set_with_agg, train_set)
+    test_set_final = handle_missing_values(test_set_final, train_set)
 
     # Define features (exclude source, target, prediction, timestamp columns)
     exclude_cols = [
@@ -68,7 +67,7 @@ def predict() -> None:
     print(f"Prediction features: {len(features)}")
 
     # Load trained model
-    model_path = config.MODEL_DIR / config.MODEL_FILENAME
+    model_path = config.MODEL_DIR / "catboost_model.cbm"
     if not model_path.exists():
         raise FileNotFoundError(
             f"Model not found at {model_path}. " "Please run 'poetry run python -m src.baseline.train' first."
