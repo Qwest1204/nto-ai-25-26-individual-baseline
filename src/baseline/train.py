@@ -10,6 +10,7 @@ import numpy as np
 from catboost import CatBoostRegressor, Pool
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+import torch  # Added import for torch.cuda.is_available()
 
 from . import config, constants
 from .features import add_aggregate_features, handle_missing_values, add_target_encoding_and_interactions
@@ -101,6 +102,11 @@ def train() -> None:
 
     # ← CATBOOST!
     cat_features = [col for col in config.CAT_FEATURES if col in features]
+
+    # Convert categorical features to string to fix CatBoost type error
+    for col in cat_features:
+        X_train[col] = X_train[col].astype(str)
+        X_val[col] = X_val[col].astype(str)
 
     print(f"\nTraining CatBoost on {len(features)} features ({len(cat_features)} categorical)...")
     model = CatBoostRegressor(
