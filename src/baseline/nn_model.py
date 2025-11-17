@@ -61,13 +61,17 @@ def prepare_data_for_nn(df: pd.DataFrame, cat_features: List[str], num_features:
 
     X_cat = np.zeros((len(df), len(cat_features)), dtype=np.int64)
     for i, col in enumerate(cat_features):
+        vals = df[col].astype(str).fillna('missing')
         if fit:
             le = LabelEncoder()
-            le.fit(df[col].astype(str).fillna('missing'))
+            le.fit(vals)
             encoders[col] = le
         else:
             le = encoders[col]
-        X_cat[:, i] = le.transform(df[col].astype(str).fillna('missing'))
+            # Handle unseen values by mapping to 'missing'
+            unseen_mask = ~vals.isin(le.classes_)
+            vals[unseen_mask] = 'missing'
+        X_cat[:, i] = le.transform(vals)
 
     cardinalities = [len(le.classes_) for le in encoders.values()] if fit else None
     return X_num, X_cat, cardinalities if fit else None, encoders if fit else None, scaler if fit else None
