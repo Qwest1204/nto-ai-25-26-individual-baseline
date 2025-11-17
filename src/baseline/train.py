@@ -126,7 +126,7 @@ def train() -> None:
     val_pool = Pool(X_val, y_val, cat_features=cat_features)
 
     model.fit(train_pool, eval_set=val_pool)
-    rint("\nTraining FT-Transformer...")
+    print("\nTraining FT-Transformer...")
     cat_feats = [col for col in config.CAT_FEATURES if col in features]
     num_feats = [col for col in features if col not in cat_feats]
 
