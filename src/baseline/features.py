@@ -225,7 +225,7 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
 
     return df
 
-TARGET_EMBED_DIM = 300  # ← Твоя цель (можно в config.py вынести)
+TARGET_EMBED_DIM = 256  # ← Твоя цель (можно в config.py вынести)
 
 def add_book_and_author_embeddings(
     df: pd.DataFrame,
