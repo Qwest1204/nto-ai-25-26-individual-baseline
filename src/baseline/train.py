@@ -9,7 +9,7 @@ import lightgbm as lgb
 import numpy as np
 from catboost import CatBoostRegressor, Pool
 import pandas as pd
-from nn_model import train_ft_transformer
+from .nn_model import train_ft_transformer
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch  # Added import for torch.cuda.is_available()
 
