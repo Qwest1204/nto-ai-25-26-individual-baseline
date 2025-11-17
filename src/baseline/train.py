@@ -1,3 +1,5 @@
+# src/baseline/train.py (updated — replace your file with this)
+
 """
 Main training script for the LightGBM model.
 
@@ -9,13 +11,14 @@ import lightgbm as lgb
 import numpy as np
 from catboost import CatBoostRegressor, Pool
 import pandas as pd
-from .nn_model import train_ft_transformer
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch  # Added import for torch.cuda.is_available()
+from torch.utils.data import DataLoader
 
 from . import config, constants
-from .features import add_aggregate_features, handle_missing_values, add_target_encoding_and_interactions
+from .features import add_target_encoding_and_interactions, handle_missing_values
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
+from .nn_model import train_ft_transformer, FTTransformer, prepare_data_for_nn, RatingDataset
 
 
 def train() -> None:
@@ -82,12 +85,11 @@ def train() -> None:
         )
     print("✅ Temporal split validation passed: all validation timestamps are after train timestamps")
 
-    # ← ВСТАВЬ ЭТУ СТРОКУ ВМЕСТО add_aggregate_features
     print("\nComputing advanced features on train split...")
     train_split_final = add_target_encoding_and_interactions(train_split.copy(), train_split)
     val_split_final = add_target_encoding_and_interactions(val_split.copy(), train_split)
 
-    # Handle missing values (остаётся)
+    # Handle missing values
     train_split_final = handle_missing_values(train_split_final, train_split)
     val_split_final = handle_missing_values(val_split_final, train_split)
 
@@ -101,7 +103,6 @@ def train() -> None:
     X_val = val_split_final[features]
     y_val = val_split_final[config.TARGET]
 
-    # ← CATBOOST!
     cat_features = [col for col in config.CAT_FEATURES if col in features]
 
     # Convert categorical features to string to fix CatBoost type error
@@ -126,6 +127,7 @@ def train() -> None:
     val_pool = Pool(X_val, y_val, cat_features=cat_features)
 
     model.fit(train_pool, eval_set=val_pool)
+
     print("\nTraining FT-Transformer...")
     cat_feats = [col for col in config.CAT_FEATURES if col in features]
     num_feats = [col for col in features if col not in cat_feats]
@@ -134,10 +136,13 @@ def train() -> None:
                          val_split_final[features], val_split_final[config.TARGET],
                          cat_feats, num_feats)
 
-    # Оцени ансамбль на val (опционально)
-    cat_val_preds = model.predict(X_val)  # CatBoost
-    ft_state = torch.load(config.MODEL_DIR / 'ft_transformer.pt')
-    ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats])
+    # === ENSEMBLE EVALUATION ON VALIDATION ===
+    print("\nEvaluating ensemble on validation split...")
+    cat_val_preds = model.predict(X_val)
+
+    ft_state = torch.load(config.MODEL_DIR / 'ft_transformer.pt', weights_only=False)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats]).to(device)
     ft_model.load_state_dict(ft_state['model'])
     ft_model.eval()
 
@@ -153,10 +158,11 @@ def train() -> None:
             ft_val_preds.append(ft_model(x_num, x_cat).cpu().numpy())
     ft_val_preds = np.concatenate(ft_val_preds)
 
-    ensemble_val_preds = 0.6 * cat_val_preds + 0.4 * ft_val_preds  # Весы подбери
+    ensemble_val_preds = 0.6 * cat_val_preds + 0.4 * ft_val_preds
     ensemble_rmse = np.sqrt(mean_squared_error(y_val, ensemble_val_preds))
     print(f"\nEnsemble Val RMSE: {ensemble_rmse:.4f}")
-    # Evaluation
+
+    # Evaluation (CatBoost only)
     val_preds = model.predict(X_val)
     rmse = np.sqrt(mean_squared_error(y_val, val_preds))
     mae = mean_absolute_error(y_val, val_preds)
