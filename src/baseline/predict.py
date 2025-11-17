@@ -7,7 +7,7 @@ then generates predictions using the trained model.
 
 import numpy as np
 import pandas as pd
-
+import torch
 from . import config, constants
 from .features import handle_missing_values, add_target_encoding_and_interactions
 
