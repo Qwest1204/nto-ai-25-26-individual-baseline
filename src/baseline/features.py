@@ -1,288 +1,110 @@
-"""
-Feature engineering script.
-"""
-
-import time
-
+# src/baseline/features.py
 import joblib
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
-from tqdm import tqdm
-from transformers import AutoModel, AutoTokenizer
+from sentence_transformers import SentenceTransformer
 
 from . import config, constants
-from .features_advanced import add_advanced_features
 
 
-def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates and adds user, book, and author aggregate features.
-
-    Uses the training data to compute mean ratings and interaction counts
-    to prevent data leakage from the test set.
-
-    Args:
-        df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion of the data for calculations.
-
-    Returns:
-        pd.DataFrame: The DataFrame with new aggregate features.
-    """
-    print("Adding aggregate features...")
-
-    # User-based aggregates
-    user_agg = train_df.groupby(constants.COL_USER_ID)[config.TARGET].agg(["mean", "count"]).reset_index()
-    user_agg.columns = [
-        constants.COL_USER_ID,
-        constants.F_USER_MEAN_RATING,
-        constants.F_USER_RATINGS_COUNT,
-    ]
-
-    # Book-based aggregates
-    book_agg = train_df.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(["mean", "count"]).reset_index()
-    book_agg.columns = [
-        constants.COL_BOOK_ID,
-        constants.F_BOOK_MEAN_RATING,
-        constants.F_BOOK_RATINGS_COUNT,
-    ]
-
-    # Author-based aggregates
-    author_agg = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(["mean"]).reset_index()
-    author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING]
-
-    # Merge aggregates into the main dataframe
-    df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
-    df = df.merge(book_agg, on=constants.COL_BOOK_ID, how="left")
-    return df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
-
-
+# ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
 def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates and adds the count of genres for each book.
-
-    Args:
-        df (pd.DataFrame): The main DataFrame to add features to.
-        book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
-
-    Returns:
-        pd.DataFrame: The DataFrame with the new 'book_genres_count' column.
-    """
-    print("Adding genre features...")
-    genre_counts = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].count().reset_index()
-    genre_counts.columns = [
-        constants.COL_BOOK_ID,
-        constants.F_BOOK_GENRES_COUNT,
-    ]
+    if constants.F_BOOK_GENRES_COUNT in df.columns:
+        return df
+    print("Adding genre count feature...")
+    genre_counts = book_genres_df.groupby(constants.COL_BOOK_ID).size().reset_index(name=constants.F_BOOK_GENRES_COUNT)
     return df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
 
 
 def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
-    """Adds TF-IDF features from book descriptions.
+    if any(c.startswith("tfidf_") for c in df.columns):
+        print("TF-IDF already present, skipping")
+        return df
 
-    Trains a TF-IDF vectorizer only on training data descriptions to avoid
-    data leakage. Applies the vectorizer to all books and merges the features.
-
-    Args:
-        df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion for fitting the vectorizer.
-        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
-
-    Returns:
-        pd.DataFrame: The DataFrame with TF-IDF features added.
-    """
-    print("Adding text features (TF-IDF)...")
-
-    # Ensure model directory exists
+    print("Adding TF-IDF features...")
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     vectorizer_path = config.MODEL_DIR / constants.TFIDF_VECTORIZER_FILENAME
 
-    # Get unique books from train set
-    train_books = train_df[constants.COL_BOOK_ID].unique()
+    train_books = set(train_df[constants.COL_BOOK_ID])
+    train_desc = descriptions_df[descriptions_df[constants.COL_BOOK_ID].isin(train_books)].copy()
+    train_desc[constants.COL_DESCRIPTION] = train_desc[constants.COL_DESCRIPTION].fillna("")
 
-    # Extract descriptions for training books only
-    train_descriptions = descriptions_df[descriptions_df[constants.COL_BOOK_ID].isin(train_books)].copy()
-    train_descriptions[constants.COL_DESCRIPTION] = train_descriptions[constants.COL_DESCRIPTION].fillna("")
-
-    # Check if vectorizer already exists (for prediction)
     if vectorizer_path.exists():
-        print(f"Loading existing vectorizer from {vectorizer_path}")
         vectorizer = joblib.load(vectorizer_path)
     else:
-        # Fit vectorizer on training descriptions only
-        print("Fitting TF-IDF vectorizer on training descriptions...")
-        vectorizer = TfidfVectorizer(
-            max_features=config.TFIDF_MAX_FEATURES,
-            min_df=config.TFIDF_MIN_DF,
-            max_df=config.TFIDF_MAX_DF,
-            ngram_range=config.TFIDF_NGRAM_RANGE,
-        )
-        vectorizer.fit(train_descriptions[constants.COL_DESCRIPTION])
-        # Save vectorizer for use in prediction
+        vectorizer = TfidfVectorizer(**{k.lower(): v for k, v in config.__dict__.items() if k.startswith("TFIDF_")})
+        vectorizer.fit(train_desc[constants.COL_DESCRIPTION])
         joblib.dump(vectorizer, vectorizer_path)
-        print(f"Vectorizer saved to {vectorizer_path}")
 
-    # Transform all book descriptions
-    all_descriptions = descriptions_df[[constants.COL_BOOK_ID, constants.COL_DESCRIPTION]].copy()
-    all_descriptions[constants.COL_DESCRIPTION] = all_descriptions[constants.COL_DESCRIPTION].fillna("")
+    all_desc = descriptions_df.set_index(constants.COL_BOOK_ID)[constants.COL_DESCRIPTION].fillna("")
+    desc_series = df[constants.COL_BOOK_ID].map(all_desc).fillna("")
 
-    # Get descriptions in the same order as df[book_id]
-    # Create a mapping book_id -> description
-    description_map = dict(
-        zip(all_descriptions[constants.COL_BOOK_ID], all_descriptions[constants.COL_DESCRIPTION], strict=False)
-    )
-
-    # Get descriptions for books in df (in the same order)
-    df_descriptions = df[constants.COL_BOOK_ID].map(description_map).fillna("")
-
-    # Transform to TF-IDF features
-    tfidf_matrix = vectorizer.transform(df_descriptions)
-
-    # Convert sparse matrix to DataFrame
-    tfidf_feature_names = [f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
-    tfidf_df = pd.DataFrame(
-        tfidf_matrix.toarray(),
-        columns=tfidf_feature_names,
-        index=df.index,
-    )
-
-    # Concatenate TF-IDF features with main DataFrame
-    df_with_tfidf = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
-
-    print(f"Added {len(tfidf_feature_names)} TF-IDF features.")
-    return df_with_tfidf
+    tfidf_matrix = vectorizer.transform(desc_series)
+    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])], index=df.index)
+    return pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
 
 
-def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
-    print("Adding Sentence-BERT embeddings (LaBSE — best for Russian books)...")
+def add_bert_features(df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
+    if any(c.startswith("labse_") for c in df.columns):
+        print("LaBSE embeddings already present, skipping")
+        return df
+
+    print("Adding LaBSE sentence embeddings...")
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    embeddings_path = config.MODEL_DIR / "labse_embeddings.pkl"
+    emb_path = config.MODEL_DIR / "labse_embeddings.pkl"
 
-    if embeddings_path.exists():
-        embeddings_dict = joblib.load(embeddings_path)
+    if emb_path.exists():
+        embeddings_dict = joblib.load(emb_path)
     else:
-        from sentence_transformers import SentenceTransformer
         model = SentenceTransformer('sentence-transformers/LaBSE')
-        descriptions = descriptions_df.set_index('book_id')['description'].fillna("").to_dict()
-        book_ids = list(descriptions.keys())
-        texts = [descriptions[bid] for bid in book_ids]
-
+        desc_dict = descriptions_df.set_index(constants.COL_BOOK_ID)[constants.COL_DESCRIPTION].fillna("").to_dict()
+        book_ids = list(desc_dict.keys())
+        texts = [desc_dict[bid] for bid in book_ids]
         embeddings = model.encode(texts, batch_size=32, show_progress_bar=True, normalize_embeddings=True)
         embeddings_dict = dict(zip(book_ids, embeddings))
-        joblib.dump(embeddings_dict, embeddings_path)
+        joblib.dump(embeddings_dict, emb_path)
 
-    vecs = np.stack(df['book_id'].map(embeddings_dict).apply(
-        lambda x: x if x is not None else np.zeros(768)
-    ).values)
-    for i in range(vecs.shape[1]):
-        df[f'labse_{i}'] = vecs[:, i]
-    print(f"Added 768 LaBSE features")
-    return df
+    zero_vec = np.zeros(768)
+    vectors = df[constants.COL_BOOK_ID].map(lambda x: embeddings_dict.get(x, zero_vec))
+    emb_array = np.stack(vectors.values)
 
-
-def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:  # noqa: C901
-    """Fills missing values using a defined strategy.
-
-    Fills missing values for age, aggregated features, and categorical features
-    to prepare the DataFrame for model training. Uses metrics from the training
-    set (e.g., global mean) to fill NaNs.
-
-    Args:
-        df (pd.DataFrame): The DataFrame with missing values.
-        train_df (pd.DataFrame): The training data, used for calculating fill metrics.
-
-    Returns:
-        pd.DataFrame: The DataFrame with missing values handled.
-    """
-    print("Handling missing values...")
-
-    # Calculate global mean from training data for filling
-    global_mean = train_df[config.TARGET].mean()
-
-    # Fill age with the median
-    age_median = df[constants.COL_AGE].median()
-    df[constants.COL_AGE] = df[constants.COL_AGE].fillna(age_median)
-
-    # Fill aggregate features for "cold start" users/items (only if they exist)
-    if constants.F_USER_MEAN_RATING in df.columns:
-        df[constants.F_USER_MEAN_RATING] = df[constants.F_USER_MEAN_RATING].fillna(global_mean)
-    if constants.F_BOOK_MEAN_RATING in df.columns:
-        df[constants.F_BOOK_MEAN_RATING] = df[constants.F_BOOK_MEAN_RATING].fillna(global_mean)
-    if constants.F_AUTHOR_MEAN_RATING in df.columns:
-        df[constants.F_AUTHOR_MEAN_RATING] = df[constants.F_AUTHOR_MEAN_RATING].fillna(global_mean)
-
-    if constants.F_USER_RATINGS_COUNT in df.columns:
-        df[constants.F_USER_RATINGS_COUNT] = df[constants.F_USER_RATINGS_COUNT].fillna(0)
-    if constants.F_BOOK_RATINGS_COUNT in df.columns:
-        df[constants.F_BOOK_RATINGS_COUNT] = df[constants.F_BOOK_RATINGS_COUNT].fillna(0)
-
-    # Fill missing avg_rating from book_data with global mean
-    df[constants.COL_AVG_RATING] = df[constants.COL_AVG_RATING].fillna(global_mean)
-
-    # Fill genre counts with 0
-    df[constants.F_BOOK_GENRES_COUNT] = df[constants.F_BOOK_GENRES_COUNT].fillna(0)
-
-    # Fill TF-IDF features with 0 (for books without descriptions)
-    tfidf_cols = [col for col in df.columns if col.startswith("tfidf_")]
-    for col in tfidf_cols:
-        df[col] = df[col].fillna(0.0)
-
-    # Fill BERT features with 0 (for books without descriptions)
-    bert_cols = [col for col in df.columns if col.startswith("bert_")]
-    for col in bert_cols:
-        df[col] = df[col].fillna(0.0)
-
-    # Fill remaining categorical features with a special value
-    for col in config.CAT_FEATURES:
-        if col in df.columns:
-            if df[col].dtype.name in ("category", "object") and df[col].isna().any():
-                df[col] = df[col].astype(str).fillna(constants.MISSING_CAT_VALUE).astype("category")
-            elif pd.api.types.is_numeric_dtype(df[col].dtype) and df[col].isna().any():
-                df[col] = df[col].fillna(constants.MISSING_NUM_VALUE)
+    for i in range(emb_array.shape[1]):
+        df[f"labse_{i}"] = emb_array[:, i]
 
     return df
 
 
+# ====================== ОСНОВНАЯ ФУНКЦИЯ ======================
 def create_features(
     df: pd.DataFrame,
     book_genres_df: pd.DataFrame | None = None,
     descriptions_df: pd.DataFrame | None = None,
     include_aggregates: bool = False,
 ) -> pd.DataFrame:
-    """
-    Универсальная функция — работает и когда метаданные уже в df (после prepare_data),
-    и когда их нужно отдельно передать.
-    """
     print("Starting feature engineering pipeline...")
-
-    # Если метаданные уже в основном df (после prepare_data), берём оттуда
-    if book_genres_df is None and descriptions_df is None:
-        train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
-    else:
-        train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
+    train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
     if include_aggregates:
         df = add_aggregate_features(df, train_df)
 
-    # === Жанры ===
-    if constants.F_BOOK_GENRES_COUNT not in df.columns:
-        if book_genres_df is not None:
-            df = add_genre_features(df, book_genres_df)
-        else:
-            # Уже посчитано в prepare_data и лежит в df
-            print("Genre count already in dataframe, skipping add_genre_features")
+    # Жанры
+    if book_genres_df is not None:
+        df = add_genre_features(df, book_genres_df)
 
-    # === Текстовые фичи ===
-    if not any(col.startswith("tfidf_") for col in df.columns):
-        df = add_text_features(df, train_df, descriptions_df or df)
-
-    if not any(col.startswith("labse_") or col.startswith("bert_") for col in df.columns):
-        df = add_bert_features(df, train_df, descriptions_df or df)
-
-    # === ADVANCED ФИЧИ (из нового файла) ===
-    if 'add_advanced_features' in globals():
-        df = add_advanced_features(df, train_df)
+    # Текстовые фичи — передаём descriptions_df только если он есть
+    if descriptions_df is not None:
+        df = add_text_features(df, train_df, descriptions_df)
+        df = add_bert_features(df, descriptions_df)
     else:
-        print("add_advanced_features not imported — skipping")
+        print("No descriptions_df provided — skipping text features (they should already be in df)")
+
+    # Advanced фичи (если файл импортирован)
+    try:
+        from .features_advanced import add_advanced_features
+        df = add_advanced_features(df, train_df)
+    except ImportError:
+        print("features_advanced.py not found — skipping advanced features")
 
     df = handle_missing_values(df, train_df)
 
@@ -290,5 +112,5 @@ def create_features(
         if col in df.columns:
             df[col] = df[col].astype("category")
 
-    print("Feature engineering complete.")
+    print(f"Feature engineering complete → {df.shape[1]} columns")
     return df
