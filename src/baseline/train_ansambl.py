@@ -47,8 +47,8 @@ def train() -> None:
     # Сначала базовые (включая LaBSE вместо старого BERT)
     full_featured = create_features(
         pd.concat([train_split, val_split], ignore_index=True),
-        book_genres_df=None,  # уже в processed
-        descriptions_df=None,
+        #book_genres_df=None,  # уже в processed
+        #descriptions_df=None,
         include_aggregates=False
     )
 

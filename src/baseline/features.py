@@ -243,38 +243,49 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
 
 
 def create_features(
-    df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
+    df: pd.DataFrame,
+    book_genres_df: pd.DataFrame | None = None,
+    descriptions_df: pd.DataFrame | None = None,
+    include_aggregates: bool = False,
 ) -> pd.DataFrame:
-    """Runs the full feature engineering pipeline.
-
-    This function orchestrates the calls to add aggregate features (optional), genre
-    features, text features (TF-IDF and BERT), and handle missing values.
-
-    Args:
-        df (pd.DataFrame): The merged DataFrame from `data_processing`.
-        book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
-        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
-        include_aggregates (bool): If True, compute aggregate features. Defaults to False.
-            Aggregates are typically computed separately during training to avoid data leakage.
-
-    Returns:
-        pd.DataFrame: The final DataFrame with all features engineered.
+    """
+    Универсальная функция — работает и когда метаданные уже в df (после prepare_data),
+    и когда их нужно отдельно передать.
     """
     print("Starting feature engineering pipeline...")
-    train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
-    # Aggregate features are computed separately during training to ensure
-    # no data leakage from validation set timestamps
+    # Если метаданные уже в основном df (после prepare_data), берём оттуда
+    if book_genres_df is None and descriptions_df is None:
+        train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
+    else:
+        train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
+
     if include_aggregates:
         df = add_aggregate_features(df, train_df)
 
-    df = add_genre_features(df, book_genres_df)
-    df = add_text_features(df, train_df, descriptions_df)  # оставь TF-IDF, он помогает
-    df = add_bert_features(df, train_df, descriptions_df)  # ← новый
-    df = add_advanced_features(df, train_df)  # ← ВОЛШЕБСТВО
+    # === Жанры ===
+    if constants.F_BOOK_GENRES_COUNT not in df.columns:
+        if book_genres_df is not None:
+            df = add_genre_features(df, book_genres_df)
+        else:
+            # Уже посчитано в prepare_data и лежит в df
+            print("Genre count already in dataframe, skipping add_genre_features")
+
+    # === Текстовые фичи ===
+    if not any(col.startswith("tfidf_") for col in df.columns):
+        df = add_text_features(df, train_df, descriptions_df or df)
+
+    if not any(col.startswith("labse_") or col.startswith("bert_") for col in df.columns):
+        df = add_bert_features(df, train_df, descriptions_df or df)
+
+    # === ADVANCED ФИЧИ (из нового файла) ===
+    if 'add_advanced_features' in globals():
+        df = add_advanced_features(df, train_df)
+    else:
+        print("add_advanced_features not imported — skipping")
+
     df = handle_missing_values(df, train_df)
 
-    # Convert categorical columns to pandas 'category' dtype for LightGBM
     for col in config.CAT_FEATURES:
         if col in df.columns:
             df[col] = df[col].astype("category")
