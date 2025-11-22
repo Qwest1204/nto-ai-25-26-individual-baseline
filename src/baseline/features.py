@@ -109,26 +109,45 @@ def add_target_encoding_and_interactions(df: pd.DataFrame, train_df: pd.DataFram
 
 
 def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """ОБЯЗАТЕЛЬНО ДОЛЖНА БЫТЬ ОПРЕДЕЛЕНА!"""
+    """Корректная обработка пропусков для категориальных колонок (без падения на Categorical)"""
     print("Handling missing values...")
 
-    # Категории
+    # 1. Категориальные колонки — добавляем 'missing' в категории, если нужно
+    for col in config.CAT_FEATURES:
+        if col not in df.columns:
+            continue
+
+        if pd.api.types.is_categorical_dtype(df[col]):
+            # Если уже category — добавляем 'missing' в список категорий
+            if 'missing' not in df[col].cat.categories:
+                df[col] = df[col].cat.add_categories('missing')
+            df[col] = df[col].fillna('missing')
+        else:
+            # Если ещё не category — просто заполняем и потом сделаем category
+            df[col] = df[col].fillna('missing')
+
+    # 2. Числовые колонки — медиана из train
+    num_cols = df.select_dtypes(include=["float64", "float32", "int64", "int32"]).columns
+    num_cols = [c for c in num_cols if c not in [config.TARGET, "rating_predict"]]
+
+    for col in num_cols:
+        if col in train_df.columns:
+            median_val = train_df[col].median()
+        else:
+            median_val = 0
+        df[col] = df[col].fillna(median_val)
+
+    # 3. Клиппинг target encoding фич (чтобы не вылезало за [0,10])
+    te_cols = [c for c in df.columns if c.endswith("_te")]
+    for col in te_cols:
+        df[col] = df[col].clip(0, 10)
+
+    # 4. Финальное приведение к category (уже безопасно)
     for col in config.CAT_FEATURES:
         if col in df.columns:
-            df[col] = df[col].fillna("missing").astype("category")
+            df[col] = df[col].astype("category")
 
-    # Числа — медиана из train
-    num_cols = df.select_dtypes(include=["float", "int"]).columns
-    for col in num_cols:
-        if col not in [config.TARGET, "rating_predict"]:
-            median = train_df[col].median() if col in train_df.columns else 0
-            df[col] = df[col].fillna(median)
-
-    # Клиппинг
-    for col in ["user_id_te", "book_id_te", "author_id_te"]:
-        if col in df.columns:
-            df[col] = df[col].clip(0, 10)
-
+    print("Missing values handled successfully!")
     return df
 
 
