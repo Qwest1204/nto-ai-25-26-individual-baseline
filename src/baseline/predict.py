@@ -5,7 +5,7 @@ Computes aggregate features on all train data and applies them to test set,
 then generates predictions using the trained model.
 """
 
-import lightgbm as lgb
+import catboost as cb
 import numpy as np
 import pandas as pd
 
@@ -68,14 +68,15 @@ def predict() -> None:
     print(f"Prediction features: {len(features)}")
 
     # Load trained model
-    model_path = config.MODEL_DIR / config.MODEL_FILENAME
+    model_path = config.MODEL_DIR / "catboost_model.cbm"
     if not model_path.exists():
         raise FileNotFoundError(
             f"Model not found at {model_path}. " "Please run 'poetry run python -m src.baseline.train' first."
         )
 
     print(f"\nLoading model from {model_path}...")
-    model = lgb.Booster(model_file=str(model_path))
+    model = cb.CatBoostRegressor()
+    model.load_model(str(model_path))
 
     # Generate predictions
     print("Generating predictions...")
