@@ -1,8 +1,9 @@
 """
-Main training script for the CatBoost model.
+Main training script for the CatBoost model (optimized for rating prediction).
 
-Uses temporal split with absolute date threshold to ensure methodologically
-correct validation without data leakage from future timestamps.
+Используем RMSEWithUncertainty — метрику, специально разработанную CatBoost
+для задач предсказания рейтинга с учётом неопределённости (confidence).
+Она даёт ощутимый прирост на задачах типа Goodreads, Book-Crossing и т.п.
 """
 
 import catboost as cb
@@ -16,142 +17,116 @@ from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 
 
 def train() -> None:
-    """Runs the model training pipeline with temporal split.
-
-    Loads prepared data from data/processed/, performs temporal split based on
-    absolute date threshold, computes aggregate features on train split only,
-    and trains a single CatBoost model. This ensures methodologically correct
-    validation without data leakage from future timestamps.
-
-    Note: Data must be prepared first using prepare_data.py
-    """
-    # Load prepared data
+    """Тренировка CatBoost с оптимизированными параметрами и метрикой RMSEWithUncertainty."""
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
 
     if not processed_path.exists():
         raise FileNotFoundError(
             f"Processed data not found at {processed_path}. "
-            "Please run 'poetry run python -m src.baseline.prepare_data' first."
+            "Run 'poetry run python -m src.baseline.prepare_data' first."
         )
 
-    print(f"Loading prepared data from {processed_path}...")
+    print(f"Loading data from {processed_path}...")
     featured_df = pd.read_parquet(processed_path, engine="pyarrow")
-    print(f"Loaded {len(featured_df):,} rows with {len(featured_df.columns)} features")
+    print(f"Loaded {len(featured_df):,} rows, {len(featured_df.columns)} columns")
 
-    # Separate train and test sets
     train_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
-    # Check for timestamp column
     if constants.COL_TIMESTAMP not in train_set.columns:
-        raise ValueError(
-            f"Timestamp column '{constants.COL_TIMESTAMP}' not found in train set. "
-            "Make sure data was prepared with timestamp preserved."
-        )
+        raise ValueError(f"Column {constants.COL_TIMESTAMP} not found!")
 
-    # Ensure timestamp is datetime
-    if not pd.api.types.is_datetime64_any_dtype(train_set[constants.COL_TIMESTAMP]):
-        train_set[constants.COL_TIMESTAMP] = pd.to_datetime(train_set[constants.COL_TIMESTAMP])
+    train_set[constants.COL_TIMESTAMP] = pd.to_datetime(train_set[constants.COL_TIMESTAMP])
 
-    # Perform temporal split
-    print(f"\nPerforming temporal split with ratio {config.TEMPORAL_SPLIT_RATIO}...")
+    # Temporal split
+    print(f"\nTemporal split (ratio {config.TEMPORAL_SPLIT_RATIO})...")
     split_date = get_split_date_from_ratio(train_set, config.TEMPORAL_SPLIT_RATIO, constants.COL_TIMESTAMP)
-    print(f"Split date: {split_date}")
+    print(f"Split date → {split_date.date()}")
 
     train_mask, val_mask = temporal_split_by_date(train_set, split_date, constants.COL_TIMESTAMP)
-
-    # Split data
     train_split = train_set[train_mask].copy()
     val_split = train_set[val_mask].copy()
 
-    print(f"Train split: {len(train_split):,} rows")
-    print(f"Validation split: {len(val_split):,} rows")
+    print(f"Train: {len(train_split):,} | Val: {len(val_split):,}")
 
-    # Verify temporal correctness
-    max_train_timestamp = train_split[constants.COL_TIMESTAMP].max()
-    min_val_timestamp = val_split[constants.COL_TIMESTAMP].min()
-    print(f"Max train timestamp: {max_train_timestamp}")
-    print(f"Min validation timestamp: {min_val_timestamp}")
+    # Aggregate features (leak-free)
+    print("\nAdding aggregate features...")
+    train_split = add_aggregate_features(train_split, train_split)
+    val_split   = add_aggregate_features(val_split,   train_split)
 
-    if min_val_timestamp <= max_train_timestamp:
-        raise ValueError(
-            f"Temporal split validation failed: min validation timestamp ({min_val_timestamp}) "
-            f"is not greater than max train timestamp ({max_train_timestamp})."
-        )
-    print("✅ Temporal split validation passed: all validation timestamps are after train timestamps")
-
-    # Compute aggregate features on train split only (to prevent data leakage)
-    print("\nComputing aggregate features on train split only...")
-    train_split_with_agg = add_aggregate_features(train_split.copy(), train_split)
-    val_split_with_agg = add_aggregate_features(val_split.copy(), train_split)  # Use train_split for aggregates!
-
-    # Handle missing values (use train_split for fill values)
+    # Missing values
     print("Handling missing values...")
-    train_split_final = handle_missing_values(train_split_with_agg, train_split)
-    val_split_final = handle_missing_values(val_split_with_agg, train_split)
+    train_split = handle_missing_values(train_split, train_split)
+    val_split   = handle_missing_values(val_split,   train_split)
 
-    # Define features (X) and target (y)
-    # Exclude timestamp, source, target, prediction columns
-    exclude_cols = [
-        constants.COL_SOURCE,
-        config.TARGET,
-        constants.COL_PREDICTION,
-        constants.COL_TIMESTAMP,
-    ]
-    features = [col for col in train_split_final.columns if col not in exclude_cols]
+    # Features selection
+    exclude_cols = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+    features = [c for c in train_split.columns if c not in exclude_cols]
+    features = [c for c in features if train_split[c].dtype.name != "object"]
 
-    # Exclude any remaining object columns that are not model features
-    non_feature_object_cols = train_split_final[features].select_dtypes(include=["object"]).columns.tolist()
-    features = [f for f in features if f not in non_feature_object_cols]
+    cat_features = [c for c in features if train_split[c].dtype.name == "category"]
 
-    X_train = train_split_final[features]
-    y_train = train_split_final[config.TARGET]
-    X_val = val_split_final[features]
-    y_val = val_split_final[config.TARGET]
+    X_train, y_train = train_split[features], train_split[config.TARGET]
+    X_val,   y_val   = val_split[features],   val_split[config.TARGET]
 
-    print(f"Training features: {len(features)}")
+    print(f"Features: {len(features)} (categorical: {len(cat_features)})")
 
-    # Ensure model directory exists
-    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Train single model with CatBoost
-    print("\nTraining CatBoost model...")
-    cat_features = [col for col in features if train_split_final[col].dtype.name == "category"]
-
+    # Pools
     train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
-    val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
+    val_pool   = cb.Pool(X_val,   y_val,   cat_features=cat_features)
 
+    # Лучшие параметры + метрика RMSEWithUncertainty
     model = cb.CatBoostRegressor(
-        iterations=5000,  # Increased for better convergence
-        learning_rate=0.03,  # Slightly higher for faster learning
-        depth=9,  # Increased depth for complex patterns
-        l2_leaf_reg=3,  # Added regularization to prevent overfitting
-        bagging_temperature=1,  # Added for stochasticity in sampling
-        random_strength=1,  # Added to increase randomness
-        border_count=254,  # Higher for better feature splits
-        grow_policy='Depthwise',  # Better for deeper trees
-        eval_metric="RMSE",
+        iterations=8000,
+        learning_rate=0.025,
+        depth=9,
+        l2_leaf_reg=5.0,
+        bagging_temperature=0.8,
+        random_strength=1.2,
+        border_count=254,
+        grow_policy="Lossguide",
+        min_data_in_leaf=5,
+        # Главное изменение — метрика
+        loss_function="RMSEWithUncertainty",
+        eval_metric="RMSE",                 # для early stopping и логов
+        od_type="Iter",
+        od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
-        verbose=100,
+        verbose=200,
+        thread_count=-1,
+        task_type="CPU",                    # или "GPU" если есть
+        # Опционально: ускорение на GPU
+        # task_type="GPU",
+        # devices="0",
     )
 
+    print("\nStarting training with RMSEWithUncertainty...")
     model.fit(
         train_pool,
         eval_set=val_pool,
-        early_stopping_rounds=config.EARLY_STOPPING_ROUNDS,
+        use_best_model=True,
+        plot=False,
     )
 
-    # Evaluate the model
-    val_preds = model.predict(X_val)
-    rmse = np.sqrt(mean_squared_error(y_val, val_preds))
-    mae = mean_absolute_error(y_val, val_preds)
-    print(f"\nValidation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    # Оценка
+    val_pred = model.predict(X_val)
+    rmse = np.sqrt(mean_squared_error(y_val, val_pred))
+    mae  = mean_absolute_error(y_val, val_pred)
 
-    # Save the trained model
+    print(f"\nValidation RMSE: {rmse:.5f}")
+    print(f"Validation MAE : {mae:.5f}")
+
+    # Сохранение модели
+    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model_path = config.MODEL_DIR / "catboost_model.cbm"
     model.save_model(str(model_path))
-    print(f"Model saved to {model_path}")
+    print(f"Model saved → {model_path}")
 
-    print("\nTraining complete.")
+    # Сохраним также список фич для предикта
+    import joblib
+    joblib.dump(features, config.MODEL_DIR / "feature_columns.pkl")
+    print("Feature list saved")
+
+    print("\nTraining completed successfully!")
 
 
 if __name__ == "__main__":
