@@ -1,11 +1,11 @@
 """
-Main training script for the LightGBM model.
+Main training script for the CatBoost model.
 
 Uses temporal split with absolute date threshold to ensure methodologically
 correct validation without data leakage from future timestamps.
 """
 
-import lightgbm as lgb
+import catboost as cb
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -20,7 +20,7 @@ def train() -> None:
 
     Loads prepared data from data/processed/, performs temporal split based on
     absolute date threshold, computes aggregate features on train split only,
-    and trains a single LightGBM model. This ensures methodologically correct
+    and trains a single CatBoost model. This ensures methodologically correct
     validation without data leakage from future timestamps.
 
     Note: Data must be prepared first using prepare_data.py
@@ -113,20 +113,26 @@ def train() -> None:
     # Ensure model directory exists
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Train single model
-    print("\nTraining LightGBM model...")
-    model = lgb.LGBMRegressor(**config.LGB_PARAMS)
+    # Train single model with CatBoost
+    print("\nTraining CatBoost model...")
+    cat_features = [col for col in features if train_split_final[col].dtype.name == "category"]
 
-    # Update fit params with early stopping callback
-    fit_params = config.LGB_FIT_PARAMS.copy()
-    fit_params["callbacks"] = [lgb.early_stopping(stopping_rounds=config.EARLY_STOPPING_ROUNDS, verbose=False)]
+    train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
+    val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
+
+    model = cb.CatBoostRegressor(
+        iterations=2000,
+        learning_rate=0.01,
+        depth=6,
+        eval_metric="RMSE",
+        random_seed=config.RANDOM_STATE,
+        verbose=100,
+    )
 
     model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric=fit_params["eval_metric"],
-        callbacks=fit_params["callbacks"],
+        train_pool,
+        eval_set=val_pool,
+        early_stopping_rounds=config.EARLY_STOPPING_ROUNDS,
     )
 
     # Evaluate the model
@@ -136,8 +142,8 @@ def train() -> None:
     print(f"\nValidation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
 
     # Save the trained model
-    model_path = config.MODEL_DIR / config.MODEL_FILENAME
-    model.booster_.save_model(str(model_path))
+    model_path = config.MODEL_DIR / "catboost_model.cbm"
+    model.save_model(str(model_path))
     print(f"Model saved to {model_path}")
 
     print("\nTraining complete.")
