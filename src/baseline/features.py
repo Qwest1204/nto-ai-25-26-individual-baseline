@@ -138,6 +138,7 @@ def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.Dat
         index=book_genres_grouped.index,
         columns=[f"genre_{c}" for c in mlb.classes_]
     )
+    genre_onehot = genre_onehot.sparse.to_dense()
     genre_onehot[constants.COL_BOOK_ID] = book_genres_grouped[constants.COL_BOOK_ID]
 
     df = df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
@@ -205,6 +206,7 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     tfidf_df = pd.DataFrame.sparse.from_spmatrix(
         tfidf_matrix, index=df.index, columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
     )
+    tfidf_df = tfidf_df.sparse.to_dense()
     df = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
 
     print(f"Added {tfidf_matrix.shape[1]} TF-IDF features.")
