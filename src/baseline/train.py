@@ -121,12 +121,17 @@ def train() -> None:
     val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
 
     model = cb.CatBoostRegressor(
-        iterations=5000,
-        learning_rate=0.001,
-        depth=8,
+        iterations=5000,  # Increased for better convergence
+        learning_rate=0.03,  # Slightly higher for faster learning
+        depth=9,  # Increased depth for complex patterns
+        l2_leaf_reg=3,  # Added regularization to prevent overfitting
+        bagging_temperature=1,  # Added for stochasticity in sampling
+        random_strength=1,  # Added to increase randomness
+        border_count=254,  # Higher for better feature splits
+        grow_policy='Depthwise',  # Better for deeper trees
         eval_metric="RMSE",
         random_seed=config.RANDOM_STATE,
-        verbose=300,
+        verbose=100,
     )
 
     model.fit(
