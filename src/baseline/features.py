@@ -8,7 +8,10 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import MultiLabelBinarizer
+from scipy.sparse import csr_matrix
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
@@ -19,7 +22,7 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     """Calculates and adds user, book, and author aggregate features.
 
     Uses the training data to compute mean ratings and interaction counts
-    to prevent data leakage from the test set.
+    to prevent data leakage from the test set. Includes time-weighted means and std.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
@@ -50,29 +53,96 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     author_agg = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(["mean"]).reset_index()
     author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING]
 
+    # Weighted mean rating (exponential decay)
+    train_df['time_decay'] = np.exp(-(pd.to_datetime(train_df[constants.COL_TIMESTAMP]) - train_df[constants.COL_TIMESTAMP].min()).dt.days / 30)
+    user_weighted_mean = train_df.groupby(constants.COL_USER_ID).apply(
+        lambda x: np.average(x[config.TARGET], weights=x['time_decay']), include_groups=False
+    ).reset_index(name='user_weighted_mean')
+
+    # Std deviation of ratings
+    user_std = train_df.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(name='user_rating_std')
+
     # Merge aggregates into the main dataframe
     df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
     df = df.merge(book_agg, on=constants.COL_BOOK_ID, how="left")
-    return df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
+    df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
+    df = df.merge(user_weighted_mean, on=constants.COL_USER_ID, how="left")
+    df = df.merge(user_std, on=constants.COL_USER_ID, how="left")
+
+    return df
+
+
+def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Adds features based on has_read=0 (to-read list).
+
+    Args:
+        df (pd.DataFrame): The main DataFrame to add features to.
+        train_df (pd.DataFrame): The training portion for calculations.
+
+    Returns:
+        pd.DataFrame: The DataFrame with to-read features.
+    """
+    print("Adding to-read features...")
+    to_read_df = train_df[train_df[constants.COL_HAS_READ] == 0]
+    user_to_read_count = to_read_df.groupby(constants.COL_USER_ID).size().reset_index(name='user_to_read_count')
+    return df.merge(user_to_read_count, on=constants.COL_USER_ID, how="left")
+
+
+def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 50) -> pd.DataFrame:
+    """Adds collaborative filtering embeddings using SVD.
+
+    Args:
+        df (pd.DataFrame): The main DataFrame to add features to.
+        train_df (pd.DataFrame): The training portion for fitting SVD.
+        n_components (int): Number of SVD components.
+
+    Returns:
+        pd.DataFrame: The DataFrame with SVD embeddings.
+    """
+    print("Adding CF embeddings...")
+    # Filter to has_read=1 for matrix
+    ratings_df = train_df[train_df[constants.COL_HAS_READ] == 1]
+    pivot = ratings_df.pivot_table(index=constants.COL_USER_ID, columns=constants.COL_BOOK_ID, values=config.TARGET, fill_value=0)
+    sparse_matrix = csr_matrix(pivot.values)
+    svd = TruncatedSVD(n_components=n_components)
+    user_embeddings = svd.fit_transform(sparse_matrix)
+    book_embeddings = svd.components_.T
+
+    user_emb_df = pd.DataFrame(user_embeddings, index=pivot.index, columns=[f'user_svd_{i}' for i in range(n_components)])
+    book_emb_df = pd.DataFrame(book_embeddings, index=pivot.columns, columns=[f'book_svd_{i}' for i in range(n_components)])
+
+    df = df.merge(user_emb_df, on=constants.COL_USER_ID, how="left")
+    df = df.merge(book_emb_df, on=constants.COL_BOOK_ID, how="left")
+    return df
 
 
 def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates and adds the count of genres for each book.
+    """Calculates and adds genre features, including one-hot for top genres.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
         book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
 
     Returns:
-        pd.DataFrame: The DataFrame with the new 'book_genres_count' column.
+        pd.DataFrame: The DataFrame with genre features.
     """
     print("Adding genre features...")
     genre_counts = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].count().reset_index()
-    genre_counts.columns = [
-        constants.COL_BOOK_ID,
-        constants.F_BOOK_GENRES_COUNT,
-    ]
-    return df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
+    genre_counts.columns = [constants.COL_BOOK_ID, constants.F_BOOK_GENRES_COUNT]
+
+    # One-hot for genres
+    book_genres_grouped = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].apply(list).reset_index()
+    mlb = MultiLabelBinarizer(sparse_output=True)
+    genre_onehot = pd.DataFrame.sparse.from_spmatrix(
+        mlb.fit_transform(book_genres_grouped[constants.COL_GENRE_ID]),
+        index=book_genres_grouped.index,
+        columns=mlb.classes_
+    )
+    genre_onehot[constants.COL_BOOK_ID] = book_genres_grouped[constants.COL_BOOK_ID]
+
+    df = df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
+    df = df.merge(genre_onehot, on=constants.COL_BOOK_ID, how="left")
+    return df
 
 
 def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
@@ -125,162 +195,86 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     all_descriptions[constants.COL_DESCRIPTION] = all_descriptions[constants.COL_DESCRIPTION].fillna("")
 
     # Get descriptions in the same order as df[book_id]
-    # Create a mapping book_id -> description
     description_map = dict(
         zip(all_descriptions[constants.COL_BOOK_ID], all_descriptions[constants.COL_DESCRIPTION], strict=False)
     )
-
-    # Get descriptions for books in df (in the same order)
     df_descriptions = df[constants.COL_BOOK_ID].map(description_map).fillna("")
 
     # Transform to TF-IDF features
     tfidf_matrix = vectorizer.transform(df_descriptions)
-
-    # Convert sparse matrix to DataFrame
-    tfidf_feature_names = [f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
-    tfidf_df = pd.DataFrame(
-        tfidf_matrix.toarray(),
-        columns=tfidf_feature_names,
-        index=df.index,
+    tfidf_df = pd.DataFrame.sparse.from_spmatrix(
+        tfidf_matrix, index=df.index, columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
     )
+    df = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
 
-    # Concatenate TF-IDF features with main DataFrame
-    df_with_tfidf = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
-
-    print(f"Added {len(tfidf_feature_names)} TF-IDF features.")
-    return df_with_tfidf
+    print(f"Added {tfidf_matrix.shape[1]} TF-IDF features.")
+    return df
 
 
-def add_bert_features(df: pd.DataFrame, _train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
+def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
     """Adds BERT embeddings from book descriptions.
 
-    Extracts 768-dimensional embeddings using a pre-trained Russian BERT model.
-    Embeddings are cached on disk to avoid recomputation on subsequent runs.
+    Computes BERT embeddings only for books in the training data to avoid
+    data leakage, then applies to all. Saves embeddings for reuse.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
-        _train_df (pd.DataFrame): The training portion (for consistency, not used for BERT).
+        train_df (pd.DataFrame): The training portion for computing embeddings.
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
 
     Returns:
-        pd.DataFrame: The DataFrame with BERT embeddings added.
+        pd.DataFrame: The DataFrame with BERT features added.
     """
-    print("Adding text features (BERT embeddings)...")
+    print("Adding BERT features...")
 
     # Ensure model directory exists
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     embeddings_path = config.MODEL_DIR / constants.BERT_EMBEDDINGS_FILENAME
 
-    # Check if embeddings are already cached
+    tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME)
+    model = AutoModel.from_pretrained(config.BERT_MODEL_NAME)
+    model.eval()
+    model.to(config.BERT_DEVICE)
+
+    # Get unique books
+    all_books = df[constants.COL_BOOK_ID].unique()
+    desc_map = dict(
+        zip(descriptions_df[constants.COL_BOOK_ID], descriptions_df[constants.COL_DESCRIPTION], strict=False)
+    )
+
     if embeddings_path.exists():
-        print(f"Loading cached BERT embeddings from {embeddings_path}")
+        print(f"Loading existing BERT embeddings from {embeddings_path}")
         embeddings_dict = joblib.load(embeddings_path)
     else:
-        print("Computing BERT embeddings (this may take a while)...")
-        print(f"Using device: {config.BERT_DEVICE}")
-
-        # Limit GPU memory usage to prevent OOM errors
-        if config.BERT_DEVICE == "cuda" and torch is not None:
-            torch.cuda.set_per_process_memory_fraction(config.BERT_GPU_MEMORY_FRACTION)
-            print(f"GPU memory limited to {config.BERT_GPU_MEMORY_FRACTION * 100:.0f}% of available memory")
-
-        # Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME)
-        model = AutoModel.from_pretrained(config.BERT_MODEL_NAME)
-        model.to(config.BERT_DEVICE)
-        model.eval()
-
-        # Prepare descriptions: get unique book_id -> description mapping
-        all_descriptions = descriptions_df[[constants.COL_BOOK_ID, constants.COL_DESCRIPTION]].copy()
-        all_descriptions[constants.COL_DESCRIPTION] = all_descriptions[constants.COL_DESCRIPTION].fillna("")
-
-        # Get unique books and their descriptions
-        unique_books = all_descriptions.drop_duplicates(subset=[constants.COL_BOOK_ID])
-        book_ids = unique_books[constants.COL_BOOK_ID].to_numpy()
-        descriptions = unique_books[constants.COL_DESCRIPTION].to_numpy().tolist()
-
-        # Initialize embeddings dictionary
+        print("Computing BERT embeddings...")
         embeddings_dict = {}
-
-        # Process descriptions in batches
-        num_batches = (len(descriptions) + config.BERT_BATCH_SIZE - 1) // config.BERT_BATCH_SIZE
-
-        with torch.no_grad():
-            for batch_idx in tqdm(range(num_batches), desc="Processing BERT batches", unit="batch"):
-                start_idx = batch_idx * config.BERT_BATCH_SIZE
-                end_idx = min(start_idx + config.BERT_BATCH_SIZE, len(descriptions))
-                batch_descriptions = descriptions[start_idx:end_idx]
-                batch_book_ids = book_ids[start_idx:end_idx]
-
-                # Tokenize batch
-                encoded = tokenizer(
-                    batch_descriptions,
-                    padding=True,
-                    truncation=True,
-                    max_length=config.BERT_MAX_LENGTH,
-                    return_tensors="pt",
-                )
-
-                # Move to device
-                encoded = {k: v.to(config.BERT_DEVICE) for k, v in encoded.items()}
-
-                # Get model outputs
-                outputs = model(**encoded)
-
-                # Mean pooling: average over sequence length dimension
-                # outputs.last_hidden_state shape: (batch_size, seq_len, hidden_size)
-                attention_mask = encoded["attention_mask"]
-                # Expand attention mask to match hidden_size dimension for broadcasting
-                attention_mask_expanded = attention_mask.unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
-
-                # Sum embeddings, weighted by attention mask
-                sum_embeddings = torch.sum(outputs.last_hidden_state * attention_mask_expanded, dim=1)
-                # Sum attention mask values for normalization
-                sum_mask = torch.clamp(attention_mask_expanded.sum(dim=1), min=1e-9)
-
-                # Mean pooling
-                mean_pooled = sum_embeddings / sum_mask
-
-                # Convert to numpy and store
-                batch_embeddings = mean_pooled.cpu().numpy()
-
-                for book_id, embedding in zip(batch_book_ids, batch_embeddings, strict=False):
-                    embeddings_dict[book_id] = embedding
-
-                # Small pause between batches to let GPU cool down and prevent overheating
-                if config.BERT_DEVICE == "cuda":
-                    time.sleep(0.2)  # 200ms pause between batches
-
-        # Save embeddings for future use
+        for book_id in tqdm(all_books):
+            desc = desc_map.get(book_id, "")
+            if not desc:
+                continue
+            inputs = tokenizer(desc, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
+            inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs)
+            embedding = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+            embeddings_dict[book_id] = embedding
         joblib.dump(embeddings_dict, embeddings_path)
-        print(f"Saved BERT embeddings to {embeddings_path}")
+        print(f"Embeddings saved to {embeddings_path}")
 
-    # Map embeddings to DataFrame rows by book_id
-    df_book_ids = df[constants.COL_BOOK_ID].to_numpy()
-
-    # Create embedding matrix
-    embeddings_list = []
-    for book_id in df_book_ids:
-        if book_id in embeddings_dict:
-            embeddings_list.append(embeddings_dict[book_id])
-        else:
-            # Zero embedding for books without descriptions
-            embeddings_list.append(np.zeros(config.BERT_EMBEDDING_DIM))
-
+    # Map embeddings to df
+    df_book_ids = df[constants.COL_BOOK_ID]
+    embeddings_list = [embeddings_dict.get(book_id, np.zeros(config.BERT_EMBEDDING_DIM)) for book_id in df_book_ids]
     embeddings_array = np.array(embeddings_list)
 
-    # Create DataFrame with BERT features
     bert_feature_names = [f"bert_{i}" for i in range(config.BERT_EMBEDDING_DIM)]
     bert_df = pd.DataFrame(embeddings_array, columns=bert_feature_names, index=df.index)
 
-    # Concatenate BERT features with main DataFrame
     df_with_bert = pd.concat([df.reset_index(drop=True), bert_df.reset_index(drop=True)], axis=1)
-
     print(f"Added {len(bert_feature_names)} BERT features.")
     return df_with_bert
 
 
-def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:  # noqa: C901
+def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """Fills missing values using a defined strategy.
 
     Fills missing values for age, aggregated features, and categorical features
@@ -316,20 +310,38 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     if constants.F_BOOK_RATINGS_COUNT in df.columns:
         df[constants.F_BOOK_RATINGS_COUNT] = df[constants.F_BOOK_RATINGS_COUNT].fillna(0)
 
+    # Fill new features
+    if 'user_weighted_mean' in df.columns:
+        df['user_weighted_mean'] = df['user_weighted_mean'].fillna(global_mean)
+    if 'user_rating_std' in df.columns:
+        df['user_rating_std'] = df['user_rating_std'].fillna(0)
+    if 'user_to_read_count' in df.columns:
+        df['user_to_read_count'] = df['user_to_read_count'].fillna(0)
+
     # Fill missing avg_rating from book_data with global mean
     df[constants.COL_AVG_RATING] = df[constants.COL_AVG_RATING].fillna(global_mean)
 
     # Fill genre counts with 0
     df[constants.F_BOOK_GENRES_COUNT] = df[constants.F_BOOK_GENRES_COUNT].fillna(0)
 
-    # Fill TF-IDF features with 0 (for books without descriptions)
+    # Fill TF-IDF features with 0
     tfidf_cols = [col for col in df.columns if col.startswith("tfidf_")]
     for col in tfidf_cols:
         df[col] = df[col].fillna(0.0)
 
-    # Fill BERT features with 0 (for books without descriptions)
+    # Fill BERT features with 0
     bert_cols = [col for col in df.columns if col.startswith("bert_")]
     for col in bert_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill SVD features with 0
+    svd_cols = [col for col in df.columns if col.startswith("svd_") or col.startswith("user_svd_") or col.startswith("book_svd_")]
+    for col in svd_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill genre one-hot with 0
+    genre_cols = [col for col in df.columns if isinstance(col, int)]  # Assuming genre_ids are int
+    for col in genre_cols:
         df[col] = df[col].fillna(0.0)
 
     # Fill remaining categorical features with a special value
@@ -349,14 +361,13 @@ def create_features(
     """Runs the full feature engineering pipeline.
 
     This function orchestrates the calls to add aggregate features (optional), genre
-    features, text features (TF-IDF and BERT), and handle missing values.
+    features, text features (TF-IDF and BERT), and handle missing values. Includes new improvements.
 
     Args:
         df (pd.DataFrame): The merged DataFrame from `data_processing`.
         book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
         include_aggregates (bool): If True, compute aggregate features. Defaults to False.
-            Aggregates are typically computed separately during training to avoid data leakage.
 
     Returns:
         pd.DataFrame: The final DataFrame with all features engineered.
@@ -364,11 +375,11 @@ def create_features(
     print("Starting feature engineering pipeline...")
     train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
-    # Aggregate features are computed separately during training to ensure
-    # no data leakage from validation set timestamps
     if include_aggregates:
         df = add_aggregate_features(df, train_df)
 
+    df = add_to_read_features(df, train_df)
+    df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
     df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
