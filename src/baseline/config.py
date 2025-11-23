@@ -30,7 +30,7 @@ TARGET = constants.COL_TARGET  # Alias for consistency
 # --- TEMPORAL SPLIT CONFIG ---
 # Ratio of data to use for training (0 < TEMPORAL_SPLIT_RATIO < 1)
 # 0.8 means 80% of data points (by timestamp) go to train, 20% to validation
-TEMPORAL_SPLIT_RATIO = 0.8
+TEMPORAL_SPLIT_RATIO = 0.95
 
 # --- TRAINING CONFIG ---
 EARLY_STOPPING_ROUNDS = 2000
