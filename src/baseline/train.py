@@ -121,12 +121,12 @@ def train() -> None:
     val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
 
     model = cb.CatBoostRegressor(
-        iterations=2000,
-        learning_rate=0.01,
-        depth=6,
+        iterations=5000,
+        learning_rate=0.001,
+        depth=8,
         eval_metric="RMSE",
         random_seed=config.RANDOM_STATE,
-        verbose=100,
+        verbose=300,
     )
 
     model.fit(
