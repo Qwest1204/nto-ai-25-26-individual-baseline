@@ -1,5 +1,6 @@
 """
-Main training script for the CatBoost model (optimized for rating prediction).
+train.py — финальная версия
+CatBoost + RMSEWithUncertainty + корректное сохранение
 """
 
 import catboost as cb
@@ -16,61 +17,47 @@ from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 def train() -> None:
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
     if not processed_path.exists():
-        raise FileNotFoundError(f"Processed data not found at {processed_path}")
+        raise FileNotFoundError(f"Processed data not found: {processed_path}")
 
-    print(f"Loading data from {processed_path}...")
-    featured_df = pd.read_parquet(processed_path, engine="pyarrow")
-    print(f"Loaded {len(featured_df):,} rows, {len(featured_df.columns)} columns")
-
-    train_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
-
-    if constants.COL_TIMESTAMP not in train_set.columns:
-        raise ValueError(f"Column {constants.COL_TIMESTAMP} not found!")
-
-    train_set[constants.COL_TIMESTAMP] = pd.to_datetime(train_set[constants.COL_TIMESTAMP])
+    print("Loading processed data...")
+    df = pd.read_parquet(processed_path, engine="pyarrow")
+    train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
     # Temporal split
-    print(f"\nTemporal split (ratio {config.TEMPORAL_SPLIT_RATIO})...")
-    split_date = get_split_date_from_ratio(train_set, config.TEMPORAL_SPLIT_RATIO, constants.COL_TIMESTAMP)
-    print(f"Split date → {split_date.date()}")
+    print(f"Temporal split (ratio {config.TEMPORAL_SPLIT_RATIO})")
+    split_date = get_split_date_from_ratio(train_df, config.TEMPORAL_SPLIT_RATIO)
+    train_mask, val_mask = temporal_split_by_date(train_df, split_date)
 
-    train_mask, val_mask = temporal_split_by_date(train_set, split_date, constants.COL_TIMESTAMP)
-    train_split = train_set[train_mask].copy()
-    val_split   = train_set[val_mask].copy()
+    train_split = train_df[train_mask].copy()
+    val_split   = train_df[val_mask].copy()
 
-    print(f"Train: {len(train_split):,} | Val: {len(val_split):,}")
+    print(f"Train rows: {len(train_split):,} | Val rows: {len(val_split):,}")
 
-    # Aggregate features + очистка от временных колонок
-    print("\nAdding aggregate features...")
+    # Aggregate features (без утечек)
     train_split = add_aggregate_features(train_split, train_split)
     val_split   = add_aggregate_features(val_split,   train_split)
 
-    temp_cols = [c for c in train_split.columns if c in ["time_decay"]]
-    train_split = train_split.drop(columns=temp_cols, errors="ignore")
-    val_split   = val_split.drop(columns=temp_cols, errors="ignore")
+    # Убираем служебные колонки
+    train_split = train_split.drop(columns=["time_decay"], errors="ignore")
+    val_split   = val_split.drop(columns=["time_decay"], errors="ignore")
 
-    # Missing values
-    print("Handling missing values...")
+    # Пропуски
     train_split = handle_missing_values(train_split, train_split)
     val_split   = handle_missing_values(val_split,   train_split)
 
-    # Features
-    exclude_cols = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
-    features = [c for c in train_split.columns if c not in exclude_cols]
-    features = [c for c in features if train_split[c].dtype.name != "object"]
-
+    # Фичи
+    exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+    features = [c for c in train_split.columns if c not in exclude and train_split[c].dtype.name != "object"]
     cat_features = [c for c in features if train_split[c].dtype.name == "category"]
 
     X_train, y_train = train_split[features], train_split[config.TARGET]
     X_val,   y_val   = val_split[features],   val_split[config.TARGET]
 
-    print(f"Features: {len(features)} (categorical: {len(cat_features)})")
+    print(f"Using {len(features)} features ({len(cat_features)} categorical)")
 
-    # Pools
     train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
     val_pool   = cb.Pool(X_val,   y_val,   cat_features=cat_features)
 
-    # Лучшие параметры + RMSEWithUncertainty как loss
     model = cb.CatBoostRegressor(
         iterations=10000,
         learning_rate=0.03,
@@ -81,45 +68,36 @@ def train() -> None:
         border_count=254,
         grow_policy="Lossguide",
         min_data_in_leaf=5,
-        loss_function="RMSEWithUncertainty",   # ← крутой лосс
-        eval_metric="RMSEWithUncertainty",                    # ← обычный RMSE для early stopping
+        loss_function="RMSEWithUncertainty",   # ← даёт лучший скор
+        eval_metric="RMSE",
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
         verbose=200,
         thread_count=-1,
-        task_type="GPU", devices="0",  # если есть GPU
+        task_type="GPU", devices="0",  # раскомментируй при наличии GPU
     )
 
-    print("\nStarting training with RMSEWithUncertainty...")
-    model.fit(
-        train_pool,
-        eval_set=val_pool,
-        use_best_model=True,
-        plot=False,
-    )
+    print("\nTraining started...")
+    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
 
-    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: берём только среднее значение из предсказания
-    print("Predicting on validation...")
-    val_pred_full = model.predict(X_val)           # shape (n, 2) → [mean, variance]
-    val_pred = val_pred_full[:, 0]                 # берём только mean
+    # Предсказание только mean (RMSEWithUncertainty выдаёт 2 столбца)
+    val_pred = model.predict(X_val)
+    if val_pred.ndim == 2:
+        val_pred = val_pred[:, 0]
 
     rmse = np.sqrt(mean_squared_error(y_val, val_pred))
     mae  = mean_absolute_error(y_val, val_pred)
-
     print(f"\nValidation RMSE: {rmse:.5f}")
     print(f"Validation MAE : {mae:.5f}")
 
     # Сохранение
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = config.MODEL_DIR / "catboost_model.cbm"
-    model.save_model(str(model_path))
-    print(f"Model saved → {model_path}")
-
+    model.save_model(str(config.MODEL_DIR / "catboost_model.cbm"))
     joblib.dump(features, config.MODEL_DIR / "feature_columns.pkl")
-    print("Feature list saved")
 
-    print("\nTraining completed successfully!")
+    print(f"\nModel saved → {config.MODEL_DIR / 'catboost_model.cbm'}")
+    print("Training completed!")
 
 
 if __name__ == "__main__":
