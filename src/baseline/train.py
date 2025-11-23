@@ -40,28 +40,22 @@ def train() -> None:
 
     print(f"Train: {len(train_split):,} | Val: {len(val_split):,}")
 
-    # Добавляем агрегаты и сразу удаляем служебные колонки (time_decay и др.)
+    # Aggregate features + очистка от временных колонок
     print("\nAdding aggregate features...")
     train_split = add_aggregate_features(train_split, train_split)
     val_split   = add_aggregate_features(val_split,   train_split)
 
-    # Удаляем все временные колонки, которые могли появиться
-    temp_cols = [c for c in train_split.columns if c.startswith("time_decay") or c == "time_decay"]
+    temp_cols = [c for c in train_split.columns if c in ["time_decay"]]
     train_split = train_split.drop(columns=temp_cols, errors="ignore")
     val_split   = val_split.drop(columns=temp_cols, errors="ignore")
 
-    # Обработка пропусков
+    # Missing values
     print("Handling missing values...")
     train_split = handle_missing_values(train_split, train_split)
     val_split   = handle_missing_values(val_split,   train_split)
 
-    # Список фичей
-    exclude_cols = {
-        constants.COL_SOURCE,
-        config.TARGET,
-        constants.COL_PREDICTION,
-        constants.COL_TIMESTAMP,
-    }
+    # Features
+    exclude_cols = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
     features = [c for c in train_split.columns if c not in exclude_cols]
     features = [c for c in features if train_split[c].dtype.name != "object"]
 
@@ -76,7 +70,7 @@ def train() -> None:
     train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
     val_pool   = cb.Pool(X_val,   y_val,   cat_features=cat_features)
 
-    # Оптимальные параметры + метрика RMSEWithUncertainty
+    # Лучшие параметры + RMSEWithUncertainty как loss
     model = cb.CatBoostRegressor(
         iterations=10000,
         learning_rate=0.03,
@@ -87,14 +81,14 @@ def train() -> None:
         border_count=254,
         grow_policy="Lossguide",
         min_data_in_leaf=5,
-        loss_function="RMSEWithUncertainty",   # Лучшая метрика для рейтингов
-        eval_metric="RMSE",
+        loss_function="RMSEWithUncertainty",   # ← крутой лосс
+        eval_metric="RMSE",                    # ← обычный RMSE для early stopping
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
         verbose=200,
         thread_count=-1,
-        # task_type="GPU", devices="0",  # раскомментируй, если есть GPU
+        # task_type="GPU", devices="0",  # если есть GPU
     )
 
     print("\nStarting training with RMSEWithUncertainty...")
@@ -105,8 +99,11 @@ def train() -> None:
         plot=False,
     )
 
-    # Оценка
-    val_pred = model.predict(X_val)
+    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: берём только среднее значение из предсказания
+    print("Predicting on validation...")
+    val_pred_full = model.predict(X_val)           # shape (n, 2) → [mean, variance]
+    val_pred = val_pred_full[:, 0]                 # берём только mean
+
     rmse = np.sqrt(mean_squared_error(y_val, val_pred))
     mae  = mean_absolute_error(y_val, val_pred)
 
