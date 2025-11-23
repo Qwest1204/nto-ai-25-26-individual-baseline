@@ -136,7 +136,7 @@ def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.Dat
     genre_onehot = pd.DataFrame.sparse.from_spmatrix(
         mlb.fit_transform(book_genres_grouped[constants.COL_GENRE_ID]),
         index=book_genres_grouped.index,
-        columns=mlb.classes_
+        columns=[f"genre_{c}" for c in mlb.classes_]
     )
     genre_onehot[constants.COL_BOOK_ID] = book_genres_grouped[constants.COL_BOOK_ID]
 
@@ -325,22 +325,22 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     df[constants.F_BOOK_GENRES_COUNT] = df[constants.F_BOOK_GENRES_COUNT].fillna(0)
 
     # Fill TF-IDF features with 0
-    tfidf_cols = [col for col in df.columns if col.startswith("tfidf_")]
+    tfidf_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("tfidf_")]
     for col in tfidf_cols:
         df[col] = df[col].fillna(0.0)
 
     # Fill BERT features with 0
-    bert_cols = [col for col in df.columns if col.startswith("bert_")]
+    bert_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("bert_")]
     for col in bert_cols:
         df[col] = df[col].fillna(0.0)
 
     # Fill SVD features with 0
-    svd_cols = [col for col in df.columns if col.startswith("svd_") or col.startswith("user_svd_") or col.startswith("book_svd_")]
+    svd_cols = [col for col in df.columns if isinstance(col, str) and (col.startswith("user_svd_") or col.startswith("book_svd_"))]
     for col in svd_cols:
         df[col] = df[col].fillna(0.0)
 
     # Fill genre one-hot with 0
-    genre_cols = [col for col in df.columns if isinstance(col, int)]  # Assuming genre_ids are int
+    genre_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("genre_")]
     for col in genre_cols:
         df[col] = df[col].fillna(0.0)
 
