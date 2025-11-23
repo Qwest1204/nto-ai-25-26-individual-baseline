@@ -82,13 +82,13 @@ def train() -> None:
         grow_policy="Lossguide",
         min_data_in_leaf=5,
         loss_function="RMSEWithUncertainty",   # ← крутой лосс
-        eval_metric="RMSE",                    # ← обычный RMSE для early stopping
+        eval_metric="RMSEWithUncertainty",                    # ← обычный RMSE для early stopping
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
         verbose=200,
         thread_count=-1,
-        # task_type="GPU", devices="0",  # если есть GPU
+        task_type="GPU", devices="0",  # если есть GPU
     )
 
     print("\nStarting training with RMSEWithUncertainty...")
