@@ -1,12 +1,9 @@
 """
 Main training script for the CatBoost model (optimized for rating prediction).
-
-Используем RMSEWithUncertainty — метрику, специально разработанную CatBoost
-для задач предсказания рейтинга с учётом неопределённости (confidence).
-Она даёт ощутимый прирост на задачах типа Goodreads, Book-Crossing и т.п.
 """
 
 import catboost as cb
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -17,14 +14,9 @@ from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 
 
 def train() -> None:
-    """Тренировка CatBoost с оптимизированными параметрами и метрикой RMSEWithUncertainty."""
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
-
     if not processed_path.exists():
-        raise FileNotFoundError(
-            f"Processed data not found at {processed_path}. "
-            "Run 'poetry run python -m src.baseline.prepare_data' first."
-        )
+        raise FileNotFoundError(f"Processed data not found at {processed_path}")
 
     print(f"Loading data from {processed_path}...")
     featured_df = pd.read_parquet(processed_path, engine="pyarrow")
@@ -44,22 +36,32 @@ def train() -> None:
 
     train_mask, val_mask = temporal_split_by_date(train_set, split_date, constants.COL_TIMESTAMP)
     train_split = train_set[train_mask].copy()
-    val_split = train_set[val_mask].copy()
+    val_split   = train_set[val_mask].copy()
 
     print(f"Train: {len(train_split):,} | Val: {len(val_split):,}")
 
-    # Aggregate features (leak-free)
+    # Добавляем агрегаты и сразу удаляем служебные колонки (time_decay и др.)
     print("\nAdding aggregate features...")
     train_split = add_aggregate_features(train_split, train_split)
     val_split   = add_aggregate_features(val_split,   train_split)
 
-    # Missing values
+    # Удаляем все временные колонки, которые могли появиться
+    temp_cols = [c for c in train_split.columns if c.startswith("time_decay") or c == "time_decay"]
+    train_split = train_split.drop(columns=temp_cols, errors="ignore")
+    val_split   = val_split.drop(columns=temp_cols, errors="ignore")
+
+    # Обработка пропусков
     print("Handling missing values...")
     train_split = handle_missing_values(train_split, train_split)
     val_split   = handle_missing_values(val_split,   train_split)
 
-    # Features selection
-    exclude_cols = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+    # Список фичей
+    exclude_cols = {
+        constants.COL_SOURCE,
+        config.TARGET,
+        constants.COL_PREDICTION,
+        constants.COL_TIMESTAMP,
+    }
     features = [c for c in train_split.columns if c not in exclude_cols]
     features = [c for c in features if train_split[c].dtype.name != "object"]
 
@@ -74,29 +76,25 @@ def train() -> None:
     train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
     val_pool   = cb.Pool(X_val,   y_val,   cat_features=cat_features)
 
-    # Лучшие параметры + метрика RMSEWithUncertainty
+    # Оптимальные параметры + метрика RMSEWithUncertainty
     model = cb.CatBoostRegressor(
-        iterations=8000,
-        learning_rate=0.025,
+        iterations=10000,
+        learning_rate=0.03,
         depth=9,
         l2_leaf_reg=5.0,
-        bagging_temperature=0.8,
-        random_strength=1.2,
+        bagging_temperature=0.9,
+        random_strength=1.0,
         border_count=254,
         grow_policy="Lossguide",
         min_data_in_leaf=5,
-        # Главное изменение — метрика
-        loss_function="RMSEWithUncertainty",
-        eval_metric="RMSE",                 # для early stopping и логов
+        loss_function="RMSEWithUncertainty",   # Лучшая метрика для рейтингов
+        eval_metric="RMSE",
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
         verbose=200,
         thread_count=-1,
-        task_type="CPU",                    # или "GPU" если есть
-        # Опционально: ускорение на GPU
-        # task_type="GPU",
-        # devices="0",
+        # task_type="GPU", devices="0",  # раскомментируй, если есть GPU
     )
 
     print("\nStarting training with RMSEWithUncertainty...")
@@ -115,14 +113,12 @@ def train() -> None:
     print(f"\nValidation RMSE: {rmse:.5f}")
     print(f"Validation MAE : {mae:.5f}")
 
-    # Сохранение модели
+    # Сохранение
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model_path = config.MODEL_DIR / "catboost_model.cbm"
     model.save_model(str(model_path))
     print(f"Model saved → {model_path}")
 
-    # Сохраним также список фич для предикта
-    import joblib
     joblib.dump(features, config.MODEL_DIR / "feature_columns.pkl")
     print("Feature list saved")
 
