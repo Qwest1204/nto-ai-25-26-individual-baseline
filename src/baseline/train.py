@@ -1,13 +1,12 @@
 """
-train.py — финальная версия
-CatBoost + RMSEWithUncertainty + корректное сохранение
+train.py — финальная версия с XGBoost вместо CatBoost
 """
 
-import catboost as cb
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+import xgboost as xgb
 
 from . import config, constants
 from .features import add_aggregate_features, handle_missing_values
@@ -33,11 +32,11 @@ def train() -> None:
 
     print(f"Train rows: {len(train_split):,} | Val rows: {len(val_split):,}")
 
-    # Aggregate features (без утечек)
+    # Aggregate features (leak-free)
     train_split = add_aggregate_features(train_split, train_split)
     val_split   = add_aggregate_features(val_split,   train_split)
 
-    # Убираем служебные колонки
+    # Удаляем служебные колонки
     train_split = train_split.drop(columns=["time_decay"], errors="ignore")
     val_split   = val_split.drop(columns=["time_decay"], errors="ignore")
 
@@ -45,58 +44,65 @@ def train() -> None:
     train_split = handle_missing_values(train_split, train_split)
     val_split   = handle_missing_values(val_split,   train_split)
 
-    # Фичи
+    # Формируем список признаков
     exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
     features = [c for c in train_split.columns if c not in exclude and train_split[c].dtype.name != "object"]
     cat_features = [c for c in features if train_split[c].dtype.name == "category"]
 
+    # XGBoost требует, чтобы категориальные признаки были преобразованы в int коды
+    for col in cat_features:
+        train_split[col] = train_split[col].cat.codes.astype("category")
+        val_split[col]   = val_split[col].cat.codes.astype("category")
+
     X_train, y_train = train_split[features], train_split[config.TARGET]
     X_val,   y_val   = val_split[features],   val_split[config.TARGET]
 
-    print(f"Using {len(features)} features ({len(cat_features)} categorical)")
+    print(f"Using {len(features)} features ({len(cat_features)} categorical → converted to codes)")
 
-    train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
-    val_pool   = cb.Pool(X_val,   y_val,   cat_features=cat_features)
+    dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
+    dval   = xgb.DMatrix(X_val,   label=y_val,   enable_categorical=True)
 
-    model = cb.CatBoostRegressor(
-        iterations=10000,
-        learning_rate=0.03,
-        depth=9,
-        l2_leaf_reg=5.0,
-        bagging_temperature=0.9,
-        random_strength=1.0,
-        border_count=254,
-        grow_policy="Lossguide",
-        min_data_in_leaf=5,
-        loss_function="RMSEWithUncertainty",   # ← даёт лучший скор
-        eval_metric="RMSE",
-        od_type="Iter",
-        od_wait=config.EARLY_STOPPING_ROUNDS,
-        random_seed=config.RANDOM_STATE,
-        verbose=200,
-        thread_count=-1,
-        task_type="GPU", devices="0",  # раскомментируй при наличии GPU
+    params = {
+        "objective":          "reg:squarederror",
+        "eval_metric":        "rmse",
+        "tree_method":        "hist",          # быстро и поддерживает categorical
+        "learning_rate":      0.03,
+        "max_depth":          9,
+        "subsample":          0.9,
+        "colsample_bytree":   0.9,
+        "reg_lambda":         5.0,
+        "reg_alpha":          0.0,
+        "min_child_weight":   5,
+        "seed":               config.RANDOM_STATE,
+        "enable_categorical": True,
+    }
+
+    print("\nTraining XGBoost...")
+    model = xgb.train(
+        params=params,
+        dtrain=dtrain,
+        num_boost_round=20000,
+        evals=[(dtrain, "train"), (dval, "val")],
+        early_stopping_rounds=config.EARLY_STOPPING_ROUNDS,
+        verbose_eval=200,
     )
 
-    print("\nTraining started...")
-    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
-
-    # Предсказание только mean (RMSEWithUncertainty выдаёт 2 столбца)
-    val_pred = model.predict(X_val)
-    if val_pred.ndim == 2:
-        val_pred = val_pred[:, 0]
+    best_iter = model.best_iteration
+    val_pred = model.predict(dval)
 
     rmse = np.sqrt(mean_squared_error(y_val, val_pred))
     mae  = mean_absolute_error(y_val, val_pred)
-    print(f"\nValidation RMSE: {rmse:.5f}")
+    print(f"\nBest iteration: {best_iter}")
+    print(f"Validation RMSE: {rmse:.5f}")
     print(f"Validation MAE : {mae:.5f}")
 
     # Сохранение
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(config.MODEL_DIR / "catboost_model.cbm"))
+    model_path = config.MODEL_DIR / "xgboost_model.json"
+    model.save_model(model_path)
     joblib.dump(features, config.MODEL_DIR / "feature_columns.pkl")
 
-    print(f"\nModel saved → {config.MODEL_DIR / 'catboost_model.cbm'}")
+    print(f"\nModel saved → {model_path}")
     print("Training completed!")
 
 
