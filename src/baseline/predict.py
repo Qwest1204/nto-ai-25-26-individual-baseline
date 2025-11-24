@@ -1,11 +1,11 @@
 """
-Inference script — полностью совместим с моделью, обученной на RMSEWithUncertainty.
+Inference script — полностью совместим с XGBoost-моделью
 """
 
-import catboost as cb
 import joblib
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 
 from . import config, constants
 from .features import add_aggregate_features, handle_missing_values
@@ -29,44 +29,45 @@ def predict() -> None:
     print("\nAdding aggregate features to test...")
     test_set = add_aggregate_features(test_set, train_set)
 
-    # Удаляем временные колонки, если остались
     test_set = test_set.drop(columns=["time_decay"], errors="ignore")
 
     # Missing values
     print("Handling missing values...")
     test_set = handle_missing_values(test_set, train_set)
 
-    # Загружаем список фичей, использованных при обучении
+    # Загружаем список фичей
     features_path = config.MODEL_DIR / "feature_columns.pkl"
     if features_path.exists():
         features = joblib.load(features_path)
-        print(f"Loaded {len(features)} features loaded from training")
+        print(f"Loaded {len(features)} training features")
     else:
-        # fallback — все кроме служебных
         exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
         features = [c for c in test_set.columns if c not in exclude and test_set[c].dtype.name != "object"]
         print(f"Warning: feature list not found — using auto-detected {len(features)} features")
 
     X_test = test_set[features]
 
+    # Преобразуем категориальные признаки точно так же, как при обучении
+    cat_features = [c for c in features if test_set[c].dtype.name == "category"]
+    for col in cat_features:
+        # Используем категории из train_set, чтобы коды совпадали
+        train_cats = train_set[col].cat.categories
+        test_set[col] = pd.Categorical(test_set[col], categories=train_cats)
+        X_test.loc[:, col] = test_set[col].cat.codes.astype("category")
+
+    dtest = xgb.DMatrix(X_test, enable_categorical=True)
+
     # Загрузка модели
-    model_path = config.MODEL_DIR / "catboost_model.cbm"
+    model_path = config.MODEL_DIR / "xgboost_model.json"
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
 
-    print(f"Loading model from {model_path}...")
-    model = cb.CatBoostRegressor()
-    model.load_model(str(model_path))
+    print(f"Loading XGBoost model from {model_path}...")
+    model = xgb.Booster()
+    model.load_model(model_path)
 
-    # КЛЮЧЕВОЕ: берём только первый столбец (среднее значение)
-    print("Predicting (taking mean from RMSEWithUncertainty)...")
-    raw_preds = model.predict(X_test)          # может быть (n, 2) или (n,)
-
-    if raw_preds.ndim == 2 and raw_preds.shape[1] == 2:
-        test_preds = raw_preds[:, 0]           # ← берём только mean
-        print(f"Detected RMSEWithUncertainty output → extracted mean (variance discarded)")
-    else:
-        test_preds = raw_preds.ravel()
+    print("Predicting...")
+    test_preds = model.predict(dtest)
 
     # Клиппинг в [0, 10]
     clipped_preds = np.clip(test_preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
