@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+import catboost as cb
+
 from . import config, constants
 from .features import add_aggregate_features, handle_missing_values
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
