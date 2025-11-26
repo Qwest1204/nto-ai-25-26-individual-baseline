@@ -3,7 +3,6 @@ train.py — финальная версия
 CatBoost + RMSEWithUncertainty + корректное сохранение
 """
 
-import catboost as cb
 import joblib
 import numpy as np
 import pandas as pd
@@ -61,15 +60,16 @@ def train() -> None:
     model = cb.CatBoostRegressor(
         iterations=10000,
         learning_rate=0.03,
-        depth=9,
-        l2_leaf_reg=5.0,
-        bagging_temperature=0.9,
+        depth=6,
+        l2_leaf_reg=10.0,
+        bagging_temperature=1.0,
         random_strength=1.0,
         border_count=254,
         grow_policy="Lossguide",
         min_data_in_leaf=5,
         loss_function="RMSEWithUncertainty",   # ← даёт лучший скор
         eval_metric="RMSE",
+        rsm=0.7,
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
