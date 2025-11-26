@@ -71,7 +71,7 @@ def train() -> None:
         min_data_in_leaf=5,
         loss_function="RMSEWithUncertainty",   # ← даёт лучший скор
         eval_metric="RMSE",
-        rsm=0.7,
+        #rsm=0.7,
         od_type="Iter",
         od_wait=config.EARLY_STOPPING_ROUNDS,
         random_seed=config.RANDOM_STATE,
