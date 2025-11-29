@@ -434,7 +434,7 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
         model = ImprovedAutoencoder(vocab_size, embedding_dim).to(config.BERT_DEVICE)
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)  # With L2 regularization
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=False)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
         # Dataset for train with denoising
         train_tensor = torch.tensor(train_encoded, dtype=torch.long)
