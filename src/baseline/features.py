@@ -230,39 +230,43 @@ def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
         pd.DataFrame: The DataFrame with BERT/Nomic features.
     """
     print("Computing embeddings...")
-    embeddings_path = config.INTERIM_DATA_DIR / "bert_embeddings.joblib"
+    embeddings_path = config.INTERIM_DATA_DIR / "bert_embeddings.pkl"
     embeddings_path.parent.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True)
-    model = AutoModel.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True).to(config.BERT_DEVICE)
+    if embeddings_path.exists():
+        embeddings_dict = joblib.load(embeddings_path)
+        print(f"Loaded embeddings from {embeddings_path}")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True)
+        model = AutoModel.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True).to(config.BERT_DEVICE)
 
-    unique_book_ids = df[constants.COL_BOOK_ID].unique()
-    embeddings_dict = {}
+        unique_book_ids = df[constants.COL_BOOK_ID].unique()
+        embeddings_dict = {}
 
-    for book_id in tqdm(unique_book_ids):
-        description = descriptions_df.loc[descriptions_df[constants.COL_BOOK_ID] == book_id, 'description'].values
-        if len(description) == 0 or pd.isna(description[0]):
-            embeddings_dict[book_id] = np.zeros(config.BERT_EMBEDDING_DIM)
-            continue
+        for book_id in tqdm(unique_book_ids):
+            description = descriptions_df.loc[descriptions_df[constants.COL_BOOK_ID] == book_id, 'description'].values
+            if len(description) == 0 or pd.isna(description[0]):
+                embeddings_dict[book_id] = np.zeros(config.BERT_EMBEDDING_DIM)
+                continue
 
-        text = f"search_document: {description[0].strip()}"  # Nomic prefix for document embeddings
-        inputs = tokenizer(text, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
-        inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
+            text = f"search_document: {description[0].strip()}"  # Nomic prefix for document embeddings
+            inputs = tokenizer(text, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
+            inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
 
-        with torch.no_grad():
-            outputs = model(**inputs)
-        embedding = outputs.last_hidden_state.mean(dim=1)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            embedding = outputs.last_hidden_state.mean(dim=1)
 
-        # Apply layer normalization if the model supports it (Nomic-specific)
-        if hasattr(model, 'layernorm'):
-            embedding = model.layernorm(embedding)
+            # Apply layer normalization if the model supports it (Nomic-specific)
+            if hasattr(model, 'layernorm'):
+                embedding = model.layernorm(embedding)
 
-        # L2 normalization as per Nomic recommendations
-        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1).squeeze().cpu().numpy()
-        embeddings_dict[book_id] = embedding
+            # L2 normalization as per Nomic recommendations
+            embedding = torch.nn.functional.normalize(embedding, p=2, dim=1).squeeze().cpu().numpy()
+            embeddings_dict[book_id] = embedding
 
-    joblib.dump(embeddings_dict, embeddings_path)
-    print(f"Embeddings saved to {embeddings_path}")
+        joblib.dump(embeddings_dict, embeddings_path)
+        print(f"Embeddings saved to {embeddings_path}")
 
     # Map embeddings to df
     df_book_ids = df[constants.COL_BOOK_ID]
