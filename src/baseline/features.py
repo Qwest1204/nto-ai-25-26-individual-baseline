@@ -19,6 +19,7 @@ import torch.nn as nn
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
 
 from . import config, constants
 
@@ -383,48 +384,49 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
         train_vals = train_df[col].astype(str).fillna('missing')
         unique_vals = train_vals.unique()
         val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
-        input_dim = len(unique_vals)
+        vocab_size = len(unique_vals) + 1  # +1 for unseen category
 
-        # Encode train
-        train_encoded = [val_to_idx[val] for val in train_vals]
+        # Encode train (0 to len-1)
+        train_encoded = np.array([val_to_idx[val] for val in train_vals])
 
-        # Encode df, unseen to input_dim
+        # Encode df, unseen to len(unique_vals)
         df_vals = df[col].astype(str).fillna('missing')
-        df_encoded = [val_to_idx.get(val, input_dim) for val in df_vals]
+        df_encoded = np.array([val_to_idx.get(val, len(unique_vals)) for val in df_vals])
 
-        # Autoencoder (same)
+        # Autoencoder with Embedding
         class Autoencoder(nn.Module):
-            def __init__(self, input_dim):
+            def __init__(self, vocab_size, embedding_dim):
                 super().__init__()
-                self.encoder = nn.Sequential(nn.Linear(input_dim, embedding_dim), nn.ReLU())
-                self.decoder = nn.Sequential(nn.Linear(embedding_dim, input_dim))
+                self.encoder = nn.Embedding(vocab_size, embedding_dim)
+                self.decoder = nn.Linear(embedding_dim, vocab_size)
 
             def forward(self, x):
-                return self.decoder(self.encoder(x))
+                emb = self.encoder(x)
+                logits = self.decoder(emb)
+                return logits
 
-        model = Autoencoder(input_dim).to(config.BERT_DEVICE)
-        criterion = nn.MSELoss()
+        model = Autoencoder(vocab_size, embedding_dim).to(config.BERT_DEVICE)
+        criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        # One-hot for train
-        train_onehot = pd.get_dummies(pd.Series(train_encoded)).values
-        dataset = TensorDataset(torch.tensor(train_onehot, dtype=torch.float32))
+        # Dataset for train
+        train_tensor = torch.tensor(train_encoded, dtype=torch.long)
+        dataset = TensorDataset(train_tensor, train_tensor)  # input and target are the same indices
         loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
         for epoch in tqdm(range(10)):
-            for batch in tqdm(loader):
-                inputs = batch[0].to(config.BERT_DEVICE)
-                outputs = model(inputs)
-                loss = criterion(outputs, inputs)
+            for inputs, targets in tqdm(loader):
+                inputs, targets = inputs.to(config.BERT_DEVICE), targets.to(config.BERT_DEVICE)
+                logits = model(inputs)
+                loss = criterion(logits, targets)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
         # Get embeddings for df
         with torch.no_grad():
-            df_onehot = pd.get_dummies(pd.Series(df_encoded)).reindex(columns=range(input_dim), fill_value=0).values
-            embeddings = model.encoder(
-                torch.tensor(df_onehot, dtype=torch.float32).to(config.BERT_DEVICE)).cpu().numpy()
+            df_tensor = torch.tensor(df_encoded, dtype=torch.long).to(config.BERT_DEVICE)
+            embeddings = model.encoder(df_tensor).cpu().numpy()
 
         emb_cols = [f"{col}_emb_{i}" for i in range(embedding_dim)]
         emb_df = pd.DataFrame(embeddings, columns=emb_cols, index=df.index)
