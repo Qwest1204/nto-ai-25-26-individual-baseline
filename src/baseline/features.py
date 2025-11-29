@@ -15,6 +15,11 @@ from scipy.sparse import csr_matrix
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
+import torch.nn as nn
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from torch.utils.data import DataLoader, TensorDataset
+
 from . import config, constants
 
 
@@ -214,54 +219,50 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
 
 
 def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
-    """Adds BERT embeddings from book descriptions.
-
-    Computes BERT embeddings only for books in the training data to avoid
-    data leakage, then applies to all. Saves embeddings for reuse.
+    """Adds BERT-like embeddings from book descriptions using the configured model (e.g., Nomic).
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion for computing embeddings.
+        train_df (pd.DataFrame): The training portion for calculations (unused here).
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
 
     Returns:
-        pd.DataFrame: The DataFrame with BERT features added.
+        pd.DataFrame: The DataFrame with BERT/Nomic features.
     """
-    print("Adding BERT features...")
+    print("Computing embeddings...")
+    embeddings_path = config.INTERIM_DATA_DIR / "bert_embeddings.joblib"
+    embeddings_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Ensure model directory exists
-    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    embeddings_path = config.MODEL_DIR / constants.BERT_EMBEDDINGS_FILENAME
+    tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True)
+    model = AutoModel.from_pretrained(config.BERT_MODEL_NAME, trust_remote_code=True).to(config.BERT_DEVICE)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME)
-    model = AutoModel.from_pretrained(config.BERT_MODEL_NAME)
-    model.eval()
-    model.to(config.BERT_DEVICE)
+    unique_book_ids = df[constants.COL_BOOK_ID].unique()
+    embeddings_dict = {}
 
-    # Get unique books
-    all_books = df[constants.COL_BOOK_ID].unique()
-    desc_map = dict(
-        zip(descriptions_df[constants.COL_BOOK_ID], descriptions_df[constants.COL_DESCRIPTION], strict=False)
-    )
+    for book_id in tqdm(unique_book_ids):
+        description = descriptions_df.loc[descriptions_df[constants.COL_BOOK_ID] == book_id, 'description'].values
+        if len(description) == 0 or pd.isna(description[0]):
+            embeddings_dict[book_id] = np.zeros(config.BERT_EMBEDDING_DIM)
+            continue
 
-    if embeddings_path.exists():
-        print(f"Loading existing BERT embeddings from {embeddings_path}")
-        embeddings_dict = joblib.load(embeddings_path)
-    else:
-        print("Computing BERT embeddings...")
-        embeddings_dict = {}
-        for book_id in tqdm(all_books):
-            desc = desc_map.get(book_id, "")
-            if not desc:
-                continue
-            inputs = tokenizer(desc, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
-            inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
-            with torch.no_grad():
-                outputs = model(**inputs)
-            embedding = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
-            embeddings_dict[book_id] = embedding
-        joblib.dump(embeddings_dict, embeddings_path)
-        print(f"Embeddings saved to {embeddings_path}")
+        text = f"search_document: {description[0].strip()}"  # Nomic prefix for document embeddings
+        inputs = tokenizer(text, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
+        inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+        embedding = outputs.last_hidden_state.mean(dim=1)
+
+        # Apply layer normalization if the model supports it (Nomic-specific)
+        if hasattr(model, 'layernorm'):
+            embedding = model.layernorm(embedding)
+
+        # L2 normalization as per Nomic recommendations
+        embedding = torch.nn.functional.normalize(embedding, p=2, dim=1).squeeze().cpu().numpy()
+        embeddings_dict[book_id] = embedding
+
+    joblib.dump(embeddings_dict, embeddings_path)
+    print(f"Embeddings saved to {embeddings_path}")
 
     # Map embeddings to df
     df_book_ids = df[constants.COL_BOOK_ID]
@@ -272,7 +273,7 @@ def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     bert_df = pd.DataFrame(embeddings_array, columns=bert_feature_names, index=df.index)
 
     df_with_bert = pd.concat([df.reset_index(drop=True), bert_df.reset_index(drop=True)], axis=1)
-    print(f"Added {len(bert_feature_names)} BERT features.")
+    print(f"Added {len(bert_feature_names)} embedding features.")
     return df_with_bert
 
 
@@ -357,23 +358,107 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     return df
 
 
+# Новая функция для категориальных эмбеддингов (используем autoencoder)
+def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embedding_dim: int = 32) -> pd.DataFrame:
+    """Генерирует эмбеддинги для категориальных признаков с помощью autoencoder.
+
+    Обучает на train_df, применяет к df. Поддерживает high-cardinality categoricals.
+
+    Args:
+        df: Основной DataFrame.
+        train_df: Train для обучения.
+        embedding_dim: Размерность эмбеддинга на признак.
+
+    Returns:
+        DataFrame с добавленными эмбеддингами.
+    """
+    print("Adding categorical embeddings...")
+    cat_cols = [col for col in config.CAT_FEATURES if col in train_df.columns and train_df[col].nunique() > 2]
+
+    embeddings_dict = {}
+    for col in cat_cols:
+        # Label encoding
+        le = LabelEncoder().fit(train_df[col].astype(str).fillna('missing'))
+        train_encoded = le.transform(train_df[col].astype(str).fillna('missing'))
+        df_encoded = le.transform(df[col].astype(str).fillna('missing'))
+
+        # Autoencoder
+        class Autoencoder(nn.Module):
+            def __init__(self, input_dim):
+                super().__init__()
+                self.encoder = nn.Sequential(nn.Linear(input_dim, embedding_dim), nn.ReLU())
+                self.decoder = nn.Sequential(nn.Linear(embedding_dim, input_dim))
+
+            def forward(self, x):
+                return self.decoder(self.encoder(x))
+
+        input_dim = len(le.classes_)
+        model = Autoencoder(input_dim).to(config.BERT_DEVICE)  # Используем то же устройство, что для BERT
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+        # One-hot для входа
+        train_onehot = pd.get_dummies(pd.Series(train_encoded)).values
+        dataset = TensorDataset(torch.tensor(train_onehot, dtype=torch.float32))
+        loader = DataLoader(dataset, batch_size=128, shuffle=True)
+
+        for epoch in range(10):  # Короткое обучение
+            for batch in loader:
+                inputs = batch[0].to(config.BERT_DEVICE)
+                outputs = model(inputs)
+                loss = criterion(outputs, inputs)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # Получаем эмбеддинги
+        with torch.no_grad():
+            df_onehot = pd.get_dummies(pd.Series(df_encoded)).reindex(columns=range(input_dim), fill_value=0).values
+            embeddings = model.encoder(
+                torch.tensor(df_onehot, dtype=torch.float32).to(config.BERT_DEVICE)).cpu().numpy()
+
+        emb_cols = [f"{col}_emb_{i}" for i in range(embedding_dim)]
+        emb_df = pd.DataFrame(embeddings, columns=emb_cols, index=df.index)
+        df = pd.concat([df, emb_df], axis=1)
+
+    return df
+
+
+# Новая функция для числовых эмбеддингов (PCA для компрессии)
+def add_numeric_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 16) -> pd.DataFrame:
+    """Компрессирует числовые признаки в эмбеддинги с помощью PCA.
+
+    Args:
+        df: Основной DataFrame.
+        train_df: Train для fit.
+        n_components: Количество компонент.
+
+    Returns:
+        DataFrame с добавленными эмбеддингами.
+    """
+    print("Adding numeric embeddings...")
+    num_cols = [col for col in train_df.columns if
+                pd.api.types.is_numeric_dtype(train_df[col]) and col != config.TARGET]
+
+    if not num_cols:
+        return df
+
+    scaler = StandardScaler().fit(train_df[num_cols].fillna(0))
+    train_scaled = scaler.transform(train_df[num_cols].fillna(0))
+    df_scaled = scaler.transform(df[num_cols].fillna(0))
+
+    pca = PCA(n_components=n_components).fit(train_scaled)
+    embeddings = pca.transform(df_scaled)
+
+    emb_cols = [f"num_emb_{i}" for i in range(n_components)]
+    emb_df = pd.DataFrame(embeddings, columns=emb_cols, index=df.index)
+    return pd.concat([df, emb_df], axis=1)
+
+
+# Обновите create_features для интеграции
 def create_features(
     df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
 ) -> pd.DataFrame:
-    """Runs the full feature engineering pipeline.
-
-    This function orchestrates the calls to add aggregate features (optional), genre
-    features, text features (TF-IDF and BERT), and handle missing values. Includes new improvements.
-
-    Args:
-        df (pd.DataFrame): The merged DataFrame from `data_processing`.
-        book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
-        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
-        include_aggregates (bool): If True, compute aggregate features. Defaults to False.
-
-    Returns:
-        pd.DataFrame: The final DataFrame with all features engineered.
-    """
     print("Starting feature engineering pipeline...")
     train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
@@ -383,8 +468,13 @@ def create_features(
     df = add_to_read_features(df, train_df)
     df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
-    df = add_text_features(df, train_df, descriptions_df)
+    #df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
+
+    # Новые эмбеддинги
+    df = add_categorical_embeddings(df, train_df)
+    df = add_numeric_embeddings(df, train_df)
+
     df = handle_missing_values(df, train_df)
 
     # Convert categorical columns to pandas 'category' dtype for LightGBM

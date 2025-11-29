@@ -46,7 +46,7 @@ TFIDF_NGRAM_RANGE = (1, 2)
 # --- BERT PARAMETERS ---
 BERT_MODEL_NAME = constants.BERT_MODEL_NAME
 BERT_BATCH_SIZE = 8
-BERT_MAX_LENGTH = 1024
+BERT_MAX_LENGTH = 8096
 BERT_EMBEDDING_DIM = 768
 BERT_DEVICE = "cuda" if torch and torch.cuda.is_available() else "cpu"
 # Limit GPU memory usage to 50% to prevent overheating and OOM errors
@@ -89,3 +89,6 @@ LGB_FIT_PARAMS = {
     "eval_metric": "rmse",
     "callbacks": [],  # Placeholder for early stopping callback
 }
+
+CAT_EMBEDDING_DIM = 32  # Размерность для категориальных эмбеддингов
+NUM_EMBEDDING_COMPONENTS = 16  # Компоненты PCA для числовых
