@@ -442,10 +442,10 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
         loader = DataLoader(dataset, batch_size=256, shuffle=True)  # Increased batch size for stability
 
         num_epochs = 20  # Increased epochs for better convergence
-        for epoch in range(num_epochs):
+        for epoch in tqdm(range(num_epochs)):
             model.train()
             total_loss = 0
-            for inputs, targets in loader:
+            for inputs, targets in tqdm(loader):
                 inputs, targets = inputs.to(config.BERT_DEVICE), targets.to(config.BERT_DEVICE)
 
                 # Denoising: Randomly corrupt 10% of inputs
