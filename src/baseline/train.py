@@ -7,6 +7,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from catboost import CatBoostRegressor
 
 import catboost as cb
 import optuna
@@ -15,6 +16,45 @@ from . import config, constants
 from .features import add_aggregate_features, handle_missing_values
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
 
+class HuberObjective(object):
+    def __init__(self, delta=1.0):
+        self.delta = delta  # Transition point between quadratic and linear loss
+
+    def calc_ders_range(self, approxes, targets, weights):
+        """
+        Computes the first and second derivatives of the Huber loss with respect to predictions.
+
+        Parameters:
+        - approxes: List of current predictions (floats).
+        - targets: List of true target values (floats).
+        - weights: Optional list of sample weights (floats or None).
+
+        Returns:
+        - List of tuples: (first_derivative, second_derivative) for each sample.
+        """
+        assert len(approxes) == len(targets)
+        if weights is not None:
+            assert len(weights) == len(approxes)
+
+        result = []
+        for index in range(len(targets)):
+            error = targets[index] - approxes[index]
+            abs_error = abs(error)
+
+            if abs_error <= self.delta:
+                der1 = -error  # dL/dpred = - (y - pred)
+                der2 = 1.0     # d2L/dpred^2 = 1
+            else:
+                der1 = -self.delta * np.sign(error)  # dL/dpred = - δ * sign(y - pred)
+                der2 = 0.0                           # d2L/dpred^2 = 0
+
+            if weights is not None:
+                der1 *= weights[index]
+                der2 *= weights[index]
+
+            result.append((der1, der2))
+
+        return result
 
 def prepare_data():
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
@@ -118,7 +158,7 @@ def train(tune_hyperparams: bool = False) -> None:
             "border_count": best_params["border_count"],
             "grow_policy": "Lossguide",
             "min_data_in_leaf": best_params["min_data_in_leaf"],
-            "loss_function": "RMSEWithUncertainty",
+            "loss_function": HuberObjective(delta=1.0),
             "eval_metric": "RMSE",
             "od_type": "Iter",
             "od_wait": config.EARLY_STOPPING_ROUNDS,
@@ -139,7 +179,7 @@ def train(tune_hyperparams: bool = False) -> None:
             "border_count": 254,
             "grow_policy": "Lossguide",
             "min_data_in_leaf": 5,
-            "loss_function": "RMSEWithUncertainty",
+            "loss_function": HuberObjective(delta=1.0),
             "eval_metric": "RMSE",
             "od_type": "Iter",
             "od_wait": config.EARLY_STOPPING_ROUNDS,
