@@ -358,7 +358,6 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     return df
 
 
-# Новая функция для категориальных эмбеддингов (используем autoencoder)
 def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embedding_dim: int = 32) -> pd.DataFrame:
     """Генерирует эмбеддинги для категориальных признаков с помощью autoencoder.
 
@@ -375,14 +374,21 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
     print("Adding categorical embeddings...")
     cat_cols = [col for col in config.CAT_FEATURES if col in train_df.columns and train_df[col].nunique() > 2]
 
-    embeddings_dict = {}
     for col in cat_cols:
-        # Label encoding
-        le = LabelEncoder().fit(train_df[col].astype(str).fillna('missing'))
-        train_encoded = le.transform(train_df[col].astype(str).fillna('missing'))
-        df_encoded = le.transform(df[col].astype(str).fillna('missing'))
+        # Manual encoding to handle unseen
+        train_vals = train_df[col].astype(str).fillna('missing')
+        unique_vals = train_vals.unique()
+        val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
+        input_dim = len(unique_vals)
 
-        # Autoencoder
+        # Encode train
+        train_encoded = [val_to_idx[val] for val in train_vals]
+
+        # Encode df, unseen to input_dim
+        df_vals = df[col].astype(str).fillna('missing')
+        df_encoded = [val_to_idx.get(val, input_dim) for val in df_vals]
+
+        # Autoencoder (same)
         class Autoencoder(nn.Module):
             def __init__(self, input_dim):
                 super().__init__()
@@ -392,17 +398,16 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
             def forward(self, x):
                 return self.decoder(self.encoder(x))
 
-        input_dim = len(le.classes_)
-        model = Autoencoder(input_dim).to(config.BERT_DEVICE)  # Используем то же устройство, что для BERT
+        model = Autoencoder(input_dim).to(config.BERT_DEVICE)
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        # One-hot для входа
+        # One-hot for train
         train_onehot = pd.get_dummies(pd.Series(train_encoded)).values
         dataset = TensorDataset(torch.tensor(train_onehot, dtype=torch.float32))
         loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-        for epoch in range(10):  # Короткое обучение
+        for epoch in range(10):
             for batch in loader:
                 inputs = batch[0].to(config.BERT_DEVICE)
                 outputs = model(inputs)
@@ -411,7 +416,7 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
                 loss.backward()
                 optimizer.step()
 
-        # Получаем эмбеддинги
+        # Get embeddings for df
         with torch.no_grad():
             df_onehot = pd.get_dummies(pd.Series(df_encoded)).reindex(columns=range(input_dim), fill_value=0).values
             embeddings = model.encoder(
