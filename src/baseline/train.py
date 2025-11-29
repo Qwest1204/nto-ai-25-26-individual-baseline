@@ -171,14 +171,14 @@ def train(tune_hyperparams: bool = False) -> None:
         # Фиксированные параметры из вашего оригинального кода
         params = {
             "iterations": 10000,
-            "learning_rate": 0.03,
-            "depth": 6,
-            "l2_leaf_reg": 10.0,
-            "bagging_temperature": 1.0,
-            "random_strength": 1.0,
-            "border_count": 254,
+            "learning_rate": 0.045411274723455734,
+            "depth": 4,
+            "l2_leaf_reg": 15.567153916308275,
+            "bagging_temperature": 1.904344685204,
+            "random_strength": 1.9265684013790787,
+            "border_count": 53,
             "grow_policy": "Lossguide",
-            "min_data_in_leaf": 5,
+            "min_data_in_leaf": 2,
             "loss_function": HuberObjective(delta=1.0),
             "eval_metric": "RMSE",
             "od_type": "Iter",
@@ -186,7 +186,8 @@ def train(tune_hyperparams: bool = False) -> None:
             "random_seed": config.RANDOM_STATE,
             "verbose": 200,
             "thread_count": -1,
-            "task_type": "GPU", "devices": "0",  # Раскомментируйте, если нет GPU
+            #"task_type": "GPU",
+            #"devices": "0",  # Раскомментируйте, если нет GPU
         }
 
     train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
