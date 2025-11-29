@@ -378,7 +378,7 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
     print("Adding categorical embeddings...")
     cat_cols = [col for col in config.CAT_FEATURES if col in train_df.columns and train_df[col].nunique() > 2]
 
-    for col in cat_cols:
+    for col in tqdm(cat_cols):
         # Manual encoding to handle unseen
         train_vals = train_df[col].astype(str).fillna('missing')
         unique_vals = train_vals.unique()
