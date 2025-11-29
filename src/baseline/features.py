@@ -458,13 +458,14 @@ def add_numeric_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_component
     train_scaled = scaler.transform(train_df[num_cols].fillna(0))
     df_scaled = scaler.transform(df[num_cols].fillna(0))
 
-    pca = PCA(n_components=n_components).fit(train_scaled)
+    # Dynamically adjust n_components
+    effective_components = min(n_components, min(train_scaled.shape))
+    pca = PCA(n_components=effective_components).fit(train_scaled)
     embeddings = pca.transform(df_scaled)
 
-    emb_cols = [f"num_emb_{i}" for i in range(n_components)]
+    emb_cols = [f"num_emb_{i}" for i in range(effective_components)]
     emb_df = pd.DataFrame(embeddings, columns=emb_cols, index=df.index)
     return pd.concat([df, emb_df], axis=1)
-
 
 # Обновите create_features для интеграции
 def create_features(
