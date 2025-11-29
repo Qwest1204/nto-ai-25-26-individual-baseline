@@ -364,7 +364,7 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
 
 
 def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embedding_dim: int = 32) -> pd.DataFrame:
-    """Генерирует эмбеддинги для категориальных признаков с помощью autoencoder.
+    """Генерирует эмбеддинги для категориальных признаков с помощью улучшенного autoencoder.
 
     Обучает на train_df, применяет к df. Поддерживает high-cardinality categoricals.
 
@@ -393,40 +393,80 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
         df_vals = df[col].astype(str).fillna('missing')
         df_encoded = np.array([val_to_idx.get(val, len(unique_vals)) for val in df_vals])
 
-        # Autoencoder with Embedding
-        class Autoencoder(nn.Module):
-            def __init__(self, vocab_size, embedding_dim):
+        # Improved Autoencoder with deeper architecture and dropout
+        class ImprovedAutoencoder(nn.Module):
+            def __init__(self, vocab_size, embedding_dim, hidden_dim=128, dropout_prob=0.2):
                 super().__init__()
-                self.encoder = nn.Embedding(vocab_size, embedding_dim)
-                self.decoder = nn.Linear(embedding_dim, vocab_size)
+                # Encoder: Embedding -> Linear -> ReLU -> Dropout -> Linear (to embedding_dim)
+                self.encoder_embedding = nn.Embedding(vocab_size, hidden_dim)
+                self.encoder_fc1 = nn.Linear(hidden_dim, hidden_dim)
+                self.encoder_dropout = nn.Dropout(dropout_prob)
+                self.encoder_fc2 = nn.Linear(hidden_dim, embedding_dim)
+
+                # Decoder: Symmetric expansion
+                self.decoder_fc1 = nn.Linear(embedding_dim, hidden_dim)
+                self.decoder_dropout = nn.Dropout(dropout_prob)
+                self.decoder_fc2 = nn.Linear(hidden_dim, hidden_dim)
+                self.decoder_output = nn.Linear(hidden_dim, vocab_size)
 
             def forward(self, x):
-                emb = self.encoder(x)
-                logits = self.decoder(emb)
+                # Encoder
+                emb = self.encoder_embedding(x)
+                x = F.relu(self.encoder_fc1(emb))
+                x = self.encoder_dropout(x)
+                latent = self.encoder_fc2(x)  # Latent embedding
+
+                # Decoder
+                x = F.relu(self.decoder_fc1(latent))
+                x = self.decoder_dropout(x)
+                x = F.relu(self.decoder_fc2(x))
+                logits = self.decoder_output(x)
                 return logits
 
-        model = Autoencoder(vocab_size, embedding_dim).to(config.BERT_DEVICE)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            def get_embedding(self, x):
+                """Extract embeddings from encoder."""
+                emb = self.encoder_embedding(x)
+                x = F.relu(self.encoder_fc1(emb))
+                x = self.encoder_dropout(x)
+                return self.encoder_fc2(x)
 
-        # Dataset for train
+        model = ImprovedAutoencoder(vocab_size, embedding_dim).to(config.BERT_DEVICE)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)  # With L2 regularization
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=False)
+
+        # Dataset for train with denoising
         train_tensor = torch.tensor(train_encoded, dtype=torch.long)
         dataset = TensorDataset(train_tensor, train_tensor)  # input and target are the same indices
-        loader = DataLoader(dataset, batch_size=128, shuffle=True)
+        loader = DataLoader(dataset, batch_size=256, shuffle=True)  # Increased batch size for stability
 
-        for epoch in tqdm(range(10)):
-            for inputs, targets in tqdm(loader):
+        num_epochs = 20  # Increased epochs for better convergence
+        for epoch in range(num_epochs):
+            model.train()
+            total_loss = 0
+            for inputs, targets in loader:
                 inputs, targets = inputs.to(config.BERT_DEVICE), targets.to(config.BERT_DEVICE)
+
+                # Denoising: Randomly corrupt 10% of inputs
+                mask = torch.rand(inputs.shape, device=config.BERT_DEVICE) < 0.1
+                random_indices = torch.randint(0, vocab_size - 1, inputs.shape, device=config.BERT_DEVICE)
+                inputs = torch.where(mask, random_indices, inputs)
+
+                optimizer.zero_grad()
                 logits = model(inputs)
                 loss = criterion(logits, targets)
-                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(loader)
+            scheduler.step(avg_loss)  # Adjust LR based on loss
 
         # Get embeddings for df
+        model.eval()
         with torch.no_grad():
             df_tensor = torch.tensor(df_encoded, dtype=torch.long).to(config.BERT_DEVICE)
-            embeddings = model.encoder(df_tensor).cpu().numpy()
+            embeddings = model.get_embedding(df_tensor).cpu().numpy()
 
         emb_cols = [f"{col}_emb_{i}" for i in range(embedding_dim)]
         emb_df = pd.DataFrame(embeddings, columns=emb_cols, index=df.index)
