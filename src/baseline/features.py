@@ -411,7 +411,7 @@ def add_categorical_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, embeddi
         dataset = TensorDataset(torch.tensor(train_onehot, dtype=torch.float32))
         loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-        for epoch in range(10):
+        for epoch in tqdm(range(10)):
             for batch in loader:
                 inputs = batch[0].to(config.BERT_DEVICE)
                 outputs = model(inputs)
