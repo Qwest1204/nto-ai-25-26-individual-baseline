@@ -33,7 +33,8 @@ def add_temporal_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     user_trend = train_sorted.groupby(constants.COL_USER_ID).apply(
         lambda x: (x[config.TARGET] - x['prev_rating']).mean(), include_groups=False).reset_index(
         name='user_rating_trend')
-    df = df.merge(user_trend, on=constants.COL_USER_ID, how='left').fillna(0)
+    df = df.merge(user_trend, on=constants.COL_USER_ID, how='left')
+    df['user_rating_trend'] = df['user_rating_trend'].fillna(0)
 
     return df
 
