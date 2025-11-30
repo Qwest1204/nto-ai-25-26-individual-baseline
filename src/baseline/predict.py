@@ -27,7 +27,7 @@ def predict() -> None:
 
     # Aggregate features (leak-free)
     print("\nAdding aggregate features to test...")
-    test_set = add_aggregate_features(test_set, train_set)
+    #test_set = add_aggregate_features(test_set, train_set)
 
     # Удаляем временные колонки, если остались
     test_set = test_set.drop(columns=["time_decay"], errors="ignore")
