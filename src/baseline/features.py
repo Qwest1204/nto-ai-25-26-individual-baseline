@@ -357,7 +357,8 @@ def add_user_genre_affinity(df: pd.DataFrame, train_df: pd.DataFrame, book_genre
     # Additional: Genre diversity (std dev of user's genre ratings)
     user_genre_std = train_with_genres.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(
         name='user_genre_rating_std')
-    df = df.merge(user_genre_std, on=constants.COL_USER_ID, how='left').fillna(0)
+    df = df.merge(user_genre_std, on=constants.COL_USER_ID, how='left')
+    df['user_genre_rating_std'] = df['user_genre_rating_std'].fillna(0)
 
     return df
 
