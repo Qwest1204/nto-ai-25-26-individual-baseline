@@ -59,7 +59,6 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
         lambda x: np.average(x[config.TARGET], weights=x['time_decay']), include_groups=False
     ).reset_index(name='user_weighted_mean')
 
-
     # Std deviation of ratings
     user_std = train_df.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(name='user_rating_std')
 
@@ -67,9 +66,6 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
         lambda x: np.sqrt(np.average((x[config.TARGET] - x[config.TARGET].mean()) ** 2, weights=x['time_decay'])),
         include_groups=False
     ).reset_index(name='user_weighted_std')
-    df = df.merge(user_weighted_std, on=constants.COL_USER_ID, how="left")
-
-    df['user_book_mean_interaction'] = df[constants.F_USER_MEAN_RATING] * df[constants.F_BOOK_MEAN_RATING]
 
     # Merge aggregates into the main dataframe
     df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
@@ -77,6 +73,10 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
     df = df.merge(user_weighted_mean, on=constants.COL_USER_ID, how="left")
     df = df.merge(user_std, on=constants.COL_USER_ID, how="left")
+    df = df.merge(user_weighted_std, on=constants.COL_USER_ID, how="left")
+
+    # Interaction feature (now after merges)
+    df['user_book_mean_interaction'] = df[constants.F_USER_MEAN_RATING] * df[constants.F_BOOK_MEAN_RATING]
 
     return df
 
@@ -329,6 +329,12 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     if 'user_to_read_count' in df.columns:
         df['user_to_read_count'] = df['user_to_read_count'].fillna(0)
 
+    if 'user_weighted_std' in df.columns:
+        df['user_weighted_std'] = df['user_weighted_std'].fillna(0)
+    if 'user_book_mean_interaction' in df.columns:
+        df['user_book_mean_interaction'] = df['user_book_mean_interaction'].fillna(global_mean ** 2)
+    if 'age_pub_interaction' in df.columns:
+        df['age_pub_interaction'] = df['age_pub_interaction'].fillna(0)
 
 
     # Fill missing avg_rating from book_data with global mean
