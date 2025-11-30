@@ -27,6 +27,9 @@ def add_temporal_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
             pd.to_datetime(df[constants.COL_TIMESTAMP]) - pd.to_datetime(df['user_last_ts'])).dt.days.fillna(
         365)  # Cap at 1 year
 
+    # Drop temporary column
+    df = df.drop(columns=['user_last_ts'], errors='ignore')
+
     # Simple trend: Difference between user's last 2 ratings (if available)
     train_sorted = train_df.sort_values([constants.COL_USER_ID, constants.COL_TIMESTAMP])
     train_sorted['prev_rating'] = train_sorted.groupby(constants.COL_USER_ID)[config.TARGET].shift(1)
@@ -37,7 +40,6 @@ def add_temporal_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     df['user_rating_trend'] = df['user_rating_trend'].fillna(0)
 
     return df
-
 
 def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """Calculates and adds user, book, and author aggregate features.
