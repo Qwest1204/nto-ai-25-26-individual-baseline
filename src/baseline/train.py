@@ -149,12 +149,10 @@ def train(tune_hyperparams: bool = False) -> None:
             "task_type": "GPU", "devices": "0",  # Раскомментируйте, если нет GPU
         }
 
-    train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
-    val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
-
+    full_pool = cb.Pool(pd.concat([X_train, X_val]), pd.concat([y_train, y_val]), cat_features=cat_features)
     model = cb.CatBoostRegressor(**params)
     print("\nTraining started...")
-    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
+    model.fit(full_pool, use_best_model=True)
 
     val_pred = model.predict(X_val)
     if val_pred.ndim == 2:

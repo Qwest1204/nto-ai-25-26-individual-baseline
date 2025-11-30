@@ -18,11 +18,28 @@ from transformers import AutoModel, AutoTokenizer
 from . import config, constants
 
 
+def add_temporal_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    # User's last rating timestamp from train
+    user_last_ts = train_df.groupby(constants.COL_USER_ID)[constants.COL_TIMESTAMP].max().reset_index(
+        name='user_last_ts')
+    df = df.merge(user_last_ts, on=constants.COL_USER_ID, how='left')
+    df['days_since_last_rating'] = (
+            pd.to_datetime(df[constants.COL_TIMESTAMP]) - pd.to_datetime(df['user_last_ts'])).dt.days.fillna(
+        365)  # Cap at 1 year
+
+    # Simple trend: Difference between user's last 2 ratings (if available)
+    train_sorted = train_df.sort_values([constants.COL_USER_ID, constants.COL_TIMESTAMP])
+    train_sorted['prev_rating'] = train_sorted.groupby(constants.COL_USER_ID)[config.TARGET].shift(1)
+    user_trend = train_sorted.groupby(constants.COL_USER_ID).apply(
+        lambda x: (x[config.TARGET] - x['prev_rating']).mean(), include_groups=False).reset_index(
+        name='user_rating_trend')
+    df = df.merge(user_trend, on=constants.COL_USER_ID, how='left').fillna(0)
+
+    return df
+
+
 def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """Calculates and adds user, book, and author aggregate features.
-
-    Uses the training data to compute mean ratings and interaction counts
-    to prevent data leakage from the test set. Includes time-weighted means and std.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
@@ -33,39 +50,33 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     """
     print("Adding aggregate features...")
 
-    # User-based aggregates
+    # Existing aggregates (user, book, author)
     user_agg = train_df.groupby(constants.COL_USER_ID)[config.TARGET].agg(["mean", "count"]).reset_index()
-    user_agg.columns = [
-        constants.COL_USER_ID,
-        constants.F_USER_MEAN_RATING,
-        constants.F_USER_RATINGS_COUNT,
-    ]
+    user_agg.columns = [constants.COL_USER_ID, constants.F_USER_MEAN_RATING, constants.F_USER_RATINGS_COUNT]
 
-    # Book-based aggregates
     book_agg = train_df.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(["mean", "count"]).reset_index()
-    book_agg.columns = [
-        constants.COL_BOOK_ID,
-        constants.F_BOOK_MEAN_RATING,
-        constants.F_BOOK_RATINGS_COUNT,
-    ]
+    book_agg.columns = [constants.COL_BOOK_ID, constants.F_BOOK_MEAN_RATING, constants.F_BOOK_RATINGS_COUNT]
 
-    # Author-based aggregates
     author_agg = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(["mean"]).reset_index()
     author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING]
 
-    # Weighted mean rating (exponential decay)
-    train_df['time_decay'] = np.exp(-(pd.to_datetime(train_df[constants.COL_TIMESTAMP]) - train_df[constants.COL_TIMESTAMP].min()).dt.days / 30)
+    # New: User-author mean rating
+    user_author_agg = train_df.groupby([constants.COL_USER_ID, constants.COL_AUTHOR_ID])[
+        config.TARGET].mean().reset_index(name='user_author_mean_rating')
+
+    # Weighted mean and std (existing)
+    train_df['time_decay'] = np.exp(
+        -(pd.to_datetime(train_df[constants.COL_TIMESTAMP]) - train_df[constants.COL_TIMESTAMP].min()).dt.days / 30)
     user_weighted_mean = train_df.groupby(constants.COL_USER_ID).apply(
         lambda x: np.average(x[config.TARGET], weights=x['time_decay']), include_groups=False
     ).reset_index(name='user_weighted_mean')
-
-    # Std deviation of ratings
     user_std = train_df.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(name='user_rating_std')
 
-    # Merge aggregates into the main dataframe
+    # Merge
     df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
     df = df.merge(book_agg, on=constants.COL_BOOK_ID, how="left")
     df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
+    df = df.merge(user_author_agg, on=[constants.COL_USER_ID, constants.COL_AUTHOR_ID], how="left")
     df = df.merge(user_weighted_mean, on=constants.COL_USER_ID, how="left")
     df = df.merge(user_std, on=constants.COL_USER_ID, how="left")
 
@@ -88,13 +99,13 @@ def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFra
     return df.merge(user_to_read_count, on=constants.COL_USER_ID, how="left")
 
 
-def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 50) -> pd.DataFrame:
+def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 100) -> pd.DataFrame:
     """Adds collaborative filtering embeddings using SVD.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
         train_df (pd.DataFrame): The training portion for fitting SVD.
-        n_components (int): Number of SVD components.
+        n_components (int): Number of SVD components. Increased to 100 for richer embeddings.
 
     Returns:
         pd.DataFrame: The DataFrame with SVD embeddings.
@@ -114,7 +125,6 @@ def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: in
     df = df.merge(user_emb_df, on=constants.COL_USER_ID, how="left")
     df = df.merge(book_emb_df, on=constants.COL_BOOK_ID, how="left")
     return df
-
 
 def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
     """Calculates and adds genre features, including one-hot for top genres.
@@ -149,67 +159,37 @@ def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.Dat
 def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
     """Adds TF-IDF features from book descriptions.
 
-    Trains a TF-IDF vectorizer only on training data descriptions to avoid
-    data leakage. Applies the vectorizer to all books and merges the features.
-
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion for fitting the vectorizer.
+        train_df (pd.DataFrame): The training portion of the data.
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
 
     Returns:
-        pd.DataFrame: The DataFrame with TF-IDF features added.
+        pd.DataFrame: The DataFrame with TF-IDF features.
     """
-    print("Adding text features (TF-IDF)...")
+    print("Adding TF-IDF features...")
 
-    # Ensure model directory exists
-    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    vectorizer_path = config.MODEL_DIR / constants.TFIDF_VECTORIZER_FILENAME
+    # Merge descriptions
+    df = df.merge(descriptions_df, on=constants.COL_BOOK_ID, how="left")
+    df[constants.COL_DESCRIPTION] = df[constants.COL_DESCRIPTION].fillna("")
 
-    # Get unique books from train set
-    train_books = train_df[constants.COL_BOOK_ID].unique()
-
-    # Extract descriptions for training books only
-    train_descriptions = descriptions_df[descriptions_df[constants.COL_BOOK_ID].isin(train_books)].copy()
-    train_descriptions[constants.COL_DESCRIPTION] = train_descriptions[constants.COL_DESCRIPTION].fillna("")
-
-    # Check if vectorizer already exists (for prediction)
-    if vectorizer_path.exists():
-        print(f"Loading existing vectorizer from {vectorizer_path}")
-        vectorizer = joblib.load(vectorizer_path)
-    else:
-        # Fit vectorizer on training descriptions only
-        print("Fitting TF-IDF vectorizer on training descriptions...")
-        vectorizer = TfidfVectorizer(
-            max_features=config.TFIDF_MAX_FEATURES,
-            min_df=config.TFIDF_MIN_DF,
-            max_df=config.TFIDF_MAX_DF,
-            ngram_range=config.TFIDF_NGRAM_RANGE,
-        )
-        vectorizer.fit(train_descriptions[constants.COL_DESCRIPTION])
-        # Save vectorizer for use in prediction
-        joblib.dump(vectorizer, vectorizer_path)
-        print(f"Vectorizer saved to {vectorizer_path}")
-
-    # Transform all book descriptions
-    all_descriptions = descriptions_df[[constants.COL_BOOK_ID, constants.COL_DESCRIPTION]].copy()
-    all_descriptions[constants.COL_DESCRIPTION] = all_descriptions[constants.COL_DESCRIPTION].fillna("")
-
-    # Get descriptions in the same order as df[book_id]
-    description_map = dict(
-        zip(all_descriptions[constants.COL_BOOK_ID], all_descriptions[constants.COL_DESCRIPTION], strict=False)
+    # Fit TF-IDF on train descriptions only
+    train_desc = train_df.merge(descriptions_df, on=constants.COL_BOOK_ID, how="left")[
+        constants.COL_DESCRIPTION].fillna("")
+    vectorizer = TfidfVectorizer(
+        max_features=200,  # Increased for more detailed features
+        min_df=config.TFIDF_MIN_DF,
+        max_df=config.TFIDF_MAX_DF,
+        ngram_range=config.TFIDF_NGRAM_RANGE,
+        stop_words='english'  # Added to remove common English words
     )
-    df_descriptions = df[constants.COL_BOOK_ID].map(description_map).fillna("")
+    vectorizer.fit(train_desc)
 
-    # Transform to TF-IDF features
-    tfidf_matrix = vectorizer.transform(df_descriptions)
-    tfidf_df = pd.DataFrame.sparse.from_spmatrix(
-        tfidf_matrix, index=df.index, columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
-    )
-    tfidf_df = tfidf_df.sparse.to_dense()
-    df = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
+    # Transform all
+    tfidf_matrix = vectorizer.transform(df[constants.COL_DESCRIPTION])
+    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=[f'tfidf_{i}' for i in range(tfidf_matrix.shape[1])])
+    df = pd.concat([df, tfidf_df], axis=1)
 
-    print(f"Added {tfidf_matrix.shape[1]} TF-IDF features.")
     return df
 
 
@@ -357,6 +337,31 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     return df
 
 
+def add_user_genre_affinity(df: pd.DataFrame, train_df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
+    # Explode genres for train ratings
+    train_with_genres = train_df.merge(book_genres_df, on=constants.COL_BOOK_ID, how='left')
+    user_genre_avg = train_with_genres.groupby([constants.COL_USER_ID, constants.COL_GENRE_ID])[
+        config.TARGET].mean().reset_index(name='user_genre_mean_rating')
+
+    # For each row in df, average the user's genre means for the book's genres
+    df_with_genres = df.merge(book_genres_df, on=constants.COL_BOOK_ID, how='left')
+    df_with_affinity = df_with_genres.merge(user_genre_avg, on=[constants.COL_USER_ID, constants.COL_GENRE_ID],
+                                            how='left')
+    book_genre_affinity = df_with_affinity.groupby([constants.COL_USER_ID, constants.COL_BOOK_ID])[
+        'user_genre_mean_rating'].mean().reset_index(name='user_book_genre_affinity')
+
+    df = df.merge(book_genre_affinity, on=[constants.COL_USER_ID, constants.COL_BOOK_ID], how='left')
+    df['user_book_genre_affinity'] = df['user_book_genre_affinity'].fillna(
+        train_df[config.TARGET].mean())  # Global mean for cold genres
+
+    # Additional: Genre diversity (std dev of user's genre ratings)
+    user_genre_std = train_with_genres.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(
+        name='user_genre_rating_std')
+    df = df.merge(user_genre_std, on=constants.COL_USER_ID, how='left').fillna(0)
+
+    return df
+
+
 def create_features(
     df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
 ) -> pd.DataFrame:
@@ -383,6 +388,8 @@ def create_features(
     df = add_to_read_features(df, train_df)
     df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
+    df = add_user_genre_affinity(df, train_df, book_genres_df)
+    df = add_temporal_features(df, train_df)
     df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
     df = handle_missing_values(df, train_df)
