@@ -66,7 +66,7 @@ def predict() -> None:
         means, variances = raw_preds[:, 0], raw_preds[:, 1]
         # Shrinkage: pred = mean + (global_mean - mean) * exp(-variance)  # Example; tune factor
         shrinkage_factor = np.exp(-variances / variances.mean())
-        test_preds = means * shrinkage_factor + (1 - shrinkage_factor) * train_df[config.TARGET].mean()     # ← берём только mean
+        test_preds = means * shrinkage_factor + (1 - shrinkage_factor) * train_set[config.TARGET].mean()     # ← берём только mean
         print(f"Detected RMSEWithUncertainty output → extracted mean (variance discarded)")
     else:
         test_preds = raw_preds.ravel()
