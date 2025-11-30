@@ -19,6 +19,9 @@ BERT_EMBEDDINGS_FILENAME = "bert_embeddings.pkl"
 BERT_MODEL_NAME = "DeepPavlov/rubert-base-cased"
 PROCESSED_DATA_FILENAME = "processed_features.parquet"
 
+F_USER_MEAN_RATING = "user_mean_rating"
+F_BOOK_MEAN_RATING = "book_mean_rating"
+
 # --- COLUMN NAMES ---
 # Main columns
 COL_USER_ID = "user_id"
