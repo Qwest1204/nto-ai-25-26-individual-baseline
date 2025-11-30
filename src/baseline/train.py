@@ -115,7 +115,7 @@ def train(tune_hyperparams: bool = False) -> None:
             "learning_rate": best_params["learning_rate"],
             "depth": best_params["depth"],
             "l2_leaf_reg": best_params["l2_leaf_reg"],
-            "bagging_temperature": best_params["bagging_temperature"],
+            #"bagging_temperature": best_params["bagging_temperature"],
             "random_strength": best_params["random_strength"],
             "border_count": best_params["border_count"],
             "grow_policy": "Lossguide",
