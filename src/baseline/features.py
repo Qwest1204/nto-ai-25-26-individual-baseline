@@ -88,7 +88,7 @@ def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFra
     return df.merge(user_to_read_count, on=constants.COL_USER_ID, how="left")
 
 
-def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 50) -> pd.DataFrame:
+def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 80) -> pd.DataFrame:
     """Adds collaborative filtering embeddings using SVD.
 
     Args:
@@ -320,6 +320,8 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     if 'user_to_read_count' in df.columns:
         df['user_to_read_count'] = df['user_to_read_count'].fillna(0)
 
+
+
     # Fill missing avg_rating from book_data with global mean
     df[constants.COL_AVG_RATING] = df[constants.COL_AVG_RATING].fillna(global_mean)
 
@@ -383,6 +385,8 @@ def create_features(
     df = add_to_read_features(df, train_df)
     df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
+    df['age_pub_interaction'] = (df[constants.COL_AGE] / df[constants.COL_AGE].std()) * (
+            df[constants.COL_PUBLICATION_YEAR] - df[constants.COL_PUBLICATION_YEAR].min())
     df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
     df = handle_missing_values(df, train_df)

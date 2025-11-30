@@ -64,7 +64,7 @@ def objective(trial, X_train, y_train, X_val, y_val, cat_features):
     params = {
         "iterations": 10000,
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-        "depth": trial.suggest_int("depth", 4, 10),
+        "depth": trial.suggest_int("depth", 5, 12),
         "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0),
         "bagging_temperature": trial.suggest_float("bagging_temperature", 0.5, 2.0),
         "random_strength": trial.suggest_float("random_strength", 0.5, 2.0),
@@ -75,6 +75,8 @@ def objective(trial, X_train, y_train, X_val, y_val, cat_features):
         "eval_metric": "RMSE",
         "od_type": "Iter",
         "od_wait": config.EARLY_STOPPING_ROUNDS,
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.6, 1.0),
         "random_seed": config.RANDOM_STATE,
         "verbose": 0,  # Отключаем вывод для тюнинга
         "thread_count": -1,
@@ -101,7 +103,7 @@ def train(tune_hyperparams: bool = False) -> None:
     if tune_hyperparams:
         print("\nStarting hyperparameter tuning with Optuna...")
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=config.RANDOM_STATE))
-        study.optimize(lambda trial: objective(trial, X_train, y_train, X_val, y_val, cat_features), n_trials=50)
+        study.optimize(lambda trial: objective(trial, X_train, y_train, X_val, y_val, cat_features), n_trials=80)
 
         best_params = study.best_params
         print(f"\nBest hyperparameters: {best_params}")
