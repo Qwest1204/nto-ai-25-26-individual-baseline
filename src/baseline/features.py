@@ -59,8 +59,17 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
         lambda x: np.average(x[config.TARGET], weights=x['time_decay']), include_groups=False
     ).reset_index(name='user_weighted_mean')
 
+
     # Std deviation of ratings
     user_std = train_df.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index(name='user_rating_std')
+
+    user_weighted_std = train_df.groupby(constants.COL_USER_ID).apply(
+        lambda x: np.sqrt(np.average((x[config.TARGET] - x[config.TARGET].mean()) ** 2, weights=x['time_decay'])),
+        include_groups=False
+    ).reset_index(name='user_weighted_std')
+    df = df.merge(user_weighted_std, on=constants.COL_USER_ID, how="left")
+
+    df['user_book_mean_interaction'] = df[constants.F_USER_MEAN_RATING] * df[constants.F_BOOK_MEAN_RATING]
 
     # Merge aggregates into the main dataframe
     df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
