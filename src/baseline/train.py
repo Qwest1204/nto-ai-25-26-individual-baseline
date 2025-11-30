@@ -130,7 +130,7 @@ def train(tune_hyperparams: bool = False) -> None:
     else:
         # Фиксированные параметры из вашего оригинального кода
         params = {
-            "iterations": 10000,
+            "iterations": 5000,
             "learning_rate": 0.01251268075603377,
             "depth": 5,
             "l2_leaf_reg": 15.970441036064543,
