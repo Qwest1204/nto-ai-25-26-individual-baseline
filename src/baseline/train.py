@@ -36,8 +36,8 @@ def prepare_data():
     print(f"Train rows: {len(train_split):,} | Val rows: {len(val_split):,}")
 
     # Aggregate features (без утечек)
-    train_split = add_aggregate_features(train_split, train_split)
-    val_split = add_aggregate_features(val_split, train_split)
+    #train_split = add_aggregate_features(train_split, train_split)
+    #val_split = add_aggregate_features(val_split, train_split)
 
     # Убираем служебные колонки
     train_split = train_split.drop(columns=["time_decay"], errors="ignore")
