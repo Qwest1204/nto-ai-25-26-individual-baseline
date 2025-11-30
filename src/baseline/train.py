@@ -165,6 +165,7 @@ def train(tune_hyperparams: bool = False) -> None:
     print(f"\nValidation RMSE: {rmse:.5f}")
     print(f"Validation MAE: {mae:.5f}")
 
+
     # Сохранение
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model.save_model(str(config.MODEL_DIR / "catboost_model.cbm"))
