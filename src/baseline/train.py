@@ -75,8 +75,8 @@ def objective(trial, X_train, y_train, X_val, y_val, cat_features):
         "eval_metric": "RMSE",
         "od_type": "Iter",
         "od_wait": config.EARLY_STOPPING_ROUNDS,
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.6, 1.0),
+        "bootstrap_type": trial.suggest_categorical("bootstrap_type", ["Bayesian", "Bernoulli", "Poisson"]),
+        "bagging_temperature": trial.suggest_float("bagging_temperature", 0.5, 2.0),
         "random_seed": config.RANDOM_STATE,
         "verbose": 0,  # Отключаем вывод для тюнинга
         "thread_count": -1,
