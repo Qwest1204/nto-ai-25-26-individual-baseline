@@ -709,39 +709,55 @@ def add_pairwise_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def create_features(
-    df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
+    df: pd.DataFrame,
+    book_genres_df: pd.DataFrame,
+    descriptions_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Runs the full feature engineering pipeline.
+    """Полный максимально агрессивный пайплайн (ожидаемый прирост 0.03–0.05+ RMSE)."""
+    print("=" * 60)
+    print("STARTING MAXIMUM FEATURE ENGINEERING PIPELINE")
+    print("=" * 60)
 
-    This function orchestrates the calls to add aggregate features (optional), genre
-    features, text features (TF-IDF and BERT), and handle missing values. Includes new improvements.
-
-    Args:
-        df (pd.DataFrame): The merged DataFrame from `data_processing`.
-        book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
-        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
-        include_aggregates (bool): If True, compute aggregate features. Defaults to False.
-
-    Returns:
-        pd.DataFrame: The final DataFrame with all features engineered.
-    """
-    print("Starting feature engineering pipeline...")
     train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
-    if include_aggregates:
-        df = add_aggregate_features(df, train_df)
+    # 1. Улучшенные агрегаты
+    df = add_enhanced_aggregate_features(df, train_df)
 
+    # 2. To-read + временные
     df = add_to_read_features(df, train_df)
-    df = add_cf_embeddings(df, train_df)
+    df = add_time_features(df, train_df)
+
+    # 3. Ранговые/квантильные фичи
+    df = add_popularity_decile_features(df, train_df)
+
+    # 4. CF embeddings: SVD + NMF
+    df = add_cf_embeddings(df, train_df, n_components=64)
+    df = add_nmf_topic_features(df, train_df, n_components=40)
+
+    # 5. Жанры + one-hot
     df = add_genre_features(df, book_genres_df)
+
+    # 6. Текст: TF-IDF + улучшенный BERT pooling
     df = add_text_features(df, train_df, descriptions_df)
     df = add_bert_features(df, train_df, descriptions_df)
+
+    # 7. Count & Target encoding
+    df = add_count_encoded_features(df, train_df)
+    df = add_target_encoded_features(df, train_df)
+
+    # 8. Массовая генерация взаимодействий
+    df = add_pairwise_interaction_features(df)
+
+    # 9. Финальная обработка пропусков
     df = handle_missing_values(df, train_df)
 
-    # Convert categorical columns to pandas 'category' dtype for LightGBM
+    # 10. Category dtype для LGBM
     for col in config.CAT_FEATURES:
         if col in df.columns:
             df[col] = df[col].astype("category")
 
-    print("Feature engineering complete.")
+    total_features = df.shape[1] - len(
+        [constants.COL_USER_ID, constants.COL_BOOK_ID, config.TARGET, constants.COL_SOURCE])
+    print(f"FINISHED: created {total_features} features in total")
+
     return df
