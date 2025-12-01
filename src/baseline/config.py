@@ -39,8 +39,8 @@ MODEL_FILENAME = "lgb_model.txt"  # Single model filename for temporal split
 
 # --- TF-IDF PARAMETERS ---
 TFIDF_MAX_FEATURES = 120
-TFIDF_MIN_DF = 20
-TFIDF_MAX_DF = 0.95
+TFIDF_MIN_DF = 2
+TFIDF_MAX_DF = 0.91
 TFIDF_NGRAM_RANGE = (1, 2)
 
 # --- BERT PARAMETERS ---
