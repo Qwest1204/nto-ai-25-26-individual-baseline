@@ -1,7 +1,3 @@
-"""
-Inference script — полностью совместим с моделью, обученной на RMSEWithUncertainty.
-"""
-
 import catboost as cb
 import joblib
 import numpy as np
@@ -12,75 +8,65 @@ from .features import add_aggregate_features, handle_missing_values
 
 
 def predict() -> None:
-    processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
-    if not processed_path.exists():
-        raise FileNotFoundError(f"Processed data not found at {processed_path}")
+    path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"Нет обработанных данных: {path}")
 
-    print(f"Loading processed data from {processed_path}...")
-    featured_df = pd.read_parquet(processed_path, engine="pyarrow")
-    print(f"Loaded {len(featured_df):,} rows with {len(featured_df.columns)} features")
+    print(f"Грузим данные из {path}")
+    df = pd.read_parquet(path)
 
-    train_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
-    test_set  = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TEST].copy()
+    train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
+    test_df  = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TEST].copy()
 
-    print(f"Train: {len(train_set):,} | Test: {len(test_set):,}")
+    # агрегации без лика
+    test_df = add_aggregate_features(test_df, train_df)
 
-    # Aggregate features (leak-free)
-    print("\nAdding aggregate features to test...")
-    test_set = add_aggregate_features(test_set, train_set)
+    # мусорная колонка
+    test_df.drop(columns=["time_decay"], errors="ignore", inplace=True)
 
-    # Удаляем временные колонки, если остались
-    test_set = test_set.drop(columns=["time_decay"], errors="ignore")
+    # заполняем пропуски как на трейне
+    test_df = handle_missing_values(test_df, train_df)
 
-    # Missing values
-    print("Handling missing values...")
-    test_set = handle_missing_values(test_set, train_set)
-
-    # Загружаем список фичей, использованных при обучении
-    features_path = config.MODEL_DIR / "feature_columns.pkl"
-    if features_path.exists():
-        features = joblib.load(features_path)
-        print(f"Loaded {len(features)} features loaded from training")
+    # пытаемся взять список фичей из обучения
+    feat_path = config.MODEL_DIR / "feature_columns.pkl"
+    if feat_path.exists():
+        features = joblib.load(feat_path)
     else:
-        # fallback — все кроме служебных
-        exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
-        features = [c for c in test_set.columns if c not in exclude and test_set[c].dtype.name != "object"]
-        print(f"Warning: feature list not found — using auto-detected {len(features)} features")
+        print("Список фичей не найден — беру всё кроме служебных")
+        exclude = {constants.COL_SOURCE, config.TARGET,
+                   constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+        features = [c for c in test_df.columns
+                    if c not in exclude and test_df[c].dtype.name != "object"]
 
-    X_test = test_set[features]
+    X_test = test_df[features]
 
-    # Загрузка модели
     model_path = config.MODEL_DIR / "catboost_model.cbm"
     if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
+        raise FileNotFoundError(f"Модель не найдена: {model_path}")
 
-    print(f"Loading model from {model_path}...")
     model = cb.CatBoostRegressor()
     model.load_model(str(model_path))
 
-    # КЛЮЧЕВОЕ: берём только первый столбец (среднее значение)
-    print("Predicting (taking mean from RMSEWithUncertainty)...")
-    raw_preds = model.predict(X_test)          # может быть (n, 2) или (n,)
-
-    if raw_preds.ndim == 2 and raw_preds.shape[1] == 2:
-        test_preds = raw_preds[:, 0]           # ← берём только mean
-        print(f"Detected RMSEWithUncertainty output → extracted mean (variance discarded)")
+    # предиктим
+    preds = model.predict(X_test)
+    if preds.ndim == 2 and preds.shape[1] == 2:
+        preds = preds[:, 0]
     else:
-        test_preds = raw_preds.ravel()
+        preds = preds.ravel()
 
-    # Клиппинг в [0, 10]
-    clipped_preds = np.clip(test_preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
+    # клипаем в разрешённый диапазон
+    preds = np.clip(preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
 
-    # Submission
-    submission_df = test_set[[constants.COL_USER_ID, constants.COL_BOOK_ID]].copy()
-    submission_df[constants.COL_PREDICTION] = clipped_preds
+    # формируем сабмит
+    sub = test_df[[constants.COL_USER_ID, constants.COL_BOOK_ID]].copy()
+    sub[constants.COL_PREDICTION] = preds
 
     config.SUBMISSION_DIR.mkdir(parents=True, exist_ok=True)
-    submission_path = config.SUBMISSION_DIR / constants.SUBMISSION_FILENAME
-    submission_df.to_csv(submission_path, index=False)
+    out_path = config.SUBMISSION_DIR / constants.SUBMISSION_FILENAME
+    sub.to_csv(out_path, index=False)
 
-    print(f"\nSubmission saved → {submission_path}")
-    print(f"Predictions: min={clipped_preds.min():.4f}, max={clipped_preds.max():.4f}, mean={clipped_preds.mean():.4f}")
+    print(f"Готово → {out_path}")
+    print(f"pred: min {preds.min():.4f} | max {preds.max():.4f} | mean {preds.mean():.4f}")
 
 
 if __name__ == "__main__":
