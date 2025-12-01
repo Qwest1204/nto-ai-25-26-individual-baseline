@@ -700,19 +700,25 @@ def add_count_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.D
 
 
 def add_target_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame, alpha: float = 10.0) -> pd.DataFrame:
-    """Target encoding с сглаживанием (без лика — только на train)."""
+    """Smoothed target encoding (без лика)."""
     print("Adding smoothed target encoding...")
     train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
     global_mean = train_read[config.TARGET].mean()
 
-    for col in ['location_city', 'location_state', 'location_country', 'publisher', constants.COL_AUTHOR_ID]:
-        if col not in train_df.columns:
+    cols_to_encode = ['location_city', 'location_state', 'location_country',
+                      'publisher', constants.COL_AUTHOR_ID, 'author']
+
+    for col in cols_to_encode:
+        if col not in df.columns:
             continue
+
         stats = train_read.groupby(col)[config.TARGET].agg(['mean', 'count'])
         smoothed = (stats['mean'] * stats['count'] + global_mean * alpha) / (stats['count'] + alpha)
-        df[f'{col}_te'] = df[col].map(smoothed).fillna(global_mean)
-    return df
 
+        # Приводим к float32, чтобы не было проблем с типом
+        df[f'{col}_te'] = df[col].map(smoothed).fillna(global_mean).astype('float32')
+
+    return df
 
 def add_pairwise_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     """Множество полиномиальных и логических взаимодействий (самые сильные фичи для GBM)."""
