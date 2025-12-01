@@ -128,12 +128,15 @@ def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.Dat
     # one-hot топ жанров
     grouped = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].apply(list).reset_index()
     mlb = MultiLabelBinarizer(sparse_output=True)
-    onehot = mlb.fit_transform(grouped[constants.COL_GENRE_ID])
-    onehot_df = pd.DataFrame.sparse.from_spmatrix(onehot,
-                                                  index=grouped.index,
-                                                  columns=[f'genre_{c}' for c in mlb.classes_])
+    onehot_sparse = mlb.fit_transform(grouped[constants.COL_GENRE_ID])
+
+    onehot_df = pd.DataFrame(
+        onehot_sparse.toarray(),
+        columns=[f'genre_{c}' for c in mlb.classes_],
+        index=grouped.index
+    )
     onehot_df[constants.COL_BOOK_ID] = grouped[constants.COL_BOOK_ID]
-    onehot_df = onehot_df.sparse.to_dense().fillna(0)
+    onehot_df = onehot_df.fillna(0)
 
     df = df.merge(onehot_df, on=constants.COL_BOOK_ID, how='left')
     return df
@@ -163,9 +166,12 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
 
     texts = df[constants.COL_BOOK_ID].map(desc_map).fillna("")
     tfidf_mat = vec.transform(texts)
-    tfidf_df = pd.DataFrame.sparse.from_spmatrix(tfidf_mat,
-                                                 columns=[f'tfidf_{i}' for i in range(tfidf_mat.shape[1])])
-    tfidf_df.index = df.index
+
+    tfidf_df = pd.DataFrame(
+        tfidf_mat.toarray(),
+        columns=[f'tfidf_{i}' for i in range(tfidf_mat.shape[1])],
+        index=df.index
+    )
 
     df = pd.concat([df, tfidf_df], axis=1)
     return df
