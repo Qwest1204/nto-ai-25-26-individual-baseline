@@ -56,8 +56,8 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
     possible_paths = [
         config.DATA_DIR / "raw" / constants.BOOK_DATA_FILENAME,  # data/raw/books.csv
         config.DATA_DIR / constants.BOOK_DATA_FILENAME,  # data/books.csv
-        Path("D:\\br\\data\\raw\\books.csv"),  # Абсолютный путь
-        Path("data/raw/books.csv"),  # Относительный путь
+        #Path("D:\\br\\data\\raw\\books.csv"),  # Абсолютный путь
+        #Path("data/raw/books.csv"),  # Относительный путь
     ]
 
     books_path = None
