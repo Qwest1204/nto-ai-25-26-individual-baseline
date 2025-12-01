@@ -50,9 +50,8 @@ F_USER_RATINGS_COUNT = "user_ratings_count"
 F_BOOK_MEAN_RATING = "book_mean_rating"
 F_BOOK_RATINGS_COUNT = "book_ratings_count"
 F_AUTHOR_MEAN_RATING = "author_mean_rating"
-F_BOOK_RELIABILITY = "book_reliability"        # используется в функции
-# Interaction features created in add_aggregate_features
-F_USER_BOOK_RATING_DIFF = "user_book_rating_diff"        # уже есть, но проверьте имя
+F_BOOK_RELIABILITY = "book_reliability"
+F_USER_BOOK_RATING_DIFF = "user_book_rating_diff"
 F_USER_BOOK_RATING_ABS_DIFF = "user_book_rating_abs_diff"
 F_USER_BOOK_COMPATIBILITY = "user_book_compatibility"
 # Book features
