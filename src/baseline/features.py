@@ -97,8 +97,11 @@ def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFra
 def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_comp=50) -> pd.DataFrame:
     print("SVD эмбеддинги...")
     ratings = train_df[train_df[constants.COL_HAS_READ] == 1]
-    pivot = ratings.pivot_table(index=constants.COL_USER_ID, columns=constants.COL_BOOK_ID,
-                                values=config.TARGET, fill_value=0)
+    pivot = ratings.pivot_table(index=constants.COL_USER_ID,
+                                columns=constants.COL_BOOK_ID,
+                                values=config.TARGET,
+                                fill_value=0)
+
     svd = TruncatedSVD(n_components=n_comp, random_state=42)
     user_emb = svd.fit_transform(pivot)
     book_emb = svd.components_.T
@@ -110,7 +113,11 @@ def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_comp=50) -> pd
 
     df = df.merge(user_df, on=constants.COL_USER_ID, how='left')
     df = df.merge(book_df, on=constants.COL_BOOK_ID, how='left')
-    return df.fillna(0)
+
+    svd_cols = [c for c in df.columns if c.startswith(('user_svd_', 'book_svd_'))]
+    df[svd_cols] = df[svd_cols].fillna(0)
+
+    return df
 
 
 def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
