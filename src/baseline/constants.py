@@ -29,12 +29,14 @@ COL_PREDICTION = "rating_predict"
 COL_HAS_READ = "has_read"
 COL_TIMESTAMP = "timestamp"
 
+
 # Feature columns (newly created)
 # --- FEATURE COLUMN NAMES (новые) ---
 # User features
 F_USER_RATING_STD = "user_rating_std"
 F_USER_MIN_RATING = "user_min_rating"
 F_USER_MAX_RATING = "user_max_rating"
+
 F_USER_RATING_RANGE = "user_rating_range"
 F_USER_RELIABILITY = "user_reliability"
 F_USER_BIAS = "user_bias"
@@ -48,6 +50,7 @@ F_BOOK_RATING_STD = "book_rating_std"
 F_BOOK_MIN_RATING = "book_min_rating"
 F_BOOK_MAX_RATING = "book_max_rating"
 F_BOOK_RATING_RANGE = "book_rating_range"
+F_BOOK_GENRES_COUNT = "book_genres_count"
 F_BOOK_POPULARITY = "book_popularity"
 F_BOOK_CONTROVERSIAL = "book_controversial"
 F_BOOK_SHRUNK_MEAN = "book_shrunk_mean"
