@@ -161,4 +161,4 @@ def train(do_tune=False):
 
 
 if __name__ == "__main__":
-    train(do_tune=False)
+    train(do_tune=True)
