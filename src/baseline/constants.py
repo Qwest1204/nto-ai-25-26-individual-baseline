@@ -45,6 +45,16 @@ F_USER_RATING_TREND = "user_rating_trend"
 F_USER_RECENCY_DAYS = "user_recency_days"
 F_USER_RATING_FREQUENCY = "user_rating_frequency"
 
+F_USER_MEAN_RATING = "user_mean_rating"
+F_USER_RATINGS_COUNT = "user_ratings_count"
+F_BOOK_MEAN_RATING = "book_mean_rating"
+F_BOOK_RATINGS_COUNT = "book_ratings_count"
+F_AUTHOR_MEAN_RATING = "author_mean_rating"
+F_BOOK_RELIABILITY = "book_reliability"        # используется в функции
+# Interaction features created in add_aggregate_features
+F_USER_BOOK_RATING_DIFF = "user_book_rating_diff"        # уже есть, но проверьте имя
+F_USER_BOOK_RATING_ABS_DIFF = "user_book_rating_abs_diff"
+F_USER_BOOK_COMPATIBILITY = "user_book_compatibility"
 # Book features
 F_BOOK_RATING_STD = "book_rating_std"
 F_BOOK_MIN_RATING = "book_min_rating"
