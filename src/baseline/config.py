@@ -24,16 +24,16 @@ SUBMISSION_DIR = OUTPUT_DIR / "submissions"
 
 # --- PARAMETERS ---
 N_SPLITS = 5  # Deprecated: kept for backwards compatibility, not used in temporal split
-RANDOM_STATE = 6446
+RANDOM_STATE = 4343
 TARGET = constants.COL_TARGET  # Alias for consistency
 
 # --- TEMPORAL SPLIT CONFIG ---
 # Ratio of data to use for training (0 < TEMPORAL_SPLIT_RATIO < 1)
 # 0.8 means 80% of data points (by timestamp) go to train, 20% to validation
-TEMPORAL_SPLIT_RATIO = 0.85
+TEMPORAL_SPLIT_RATIO = 0.95
 
 # --- TRAINING CONFIG ---
-EARLY_STOPPING_ROUNDS = 800
+EARLY_STOPPING_ROUNDS = 400
 MODEL_FILENAME_PATTERN = "lgb_fold_{fold}.txt"  # Deprecated: kept for backwards compatibility
 MODEL_FILENAME = "lgb_model.txt"  # Single model filename for temporal split
 

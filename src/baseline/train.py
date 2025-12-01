@@ -62,7 +62,7 @@ def prepare_data():
 
 def objective(trial, X_train, y_train, X_val, y_val, cat_features):
     params = {
-        "iterations": 10000,
+        "iterations": 3000,
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
         "depth": trial.suggest_int("depth", 4, 10),
         "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0),
@@ -109,7 +109,7 @@ def train(tune_hyperparams: bool = False) -> None:
 
         # Обучаем финальную модель с лучшими параметрами
         params = {
-            "iterations": 10000,
+            "iterations": 3000,
             "learning_rate": best_params["learning_rate"],
             "depth": best_params["depth"],
             "l2_leaf_reg": best_params["l2_leaf_reg"],
@@ -130,7 +130,7 @@ def train(tune_hyperparams: bool = False) -> None:
     else:
         # Фиксированные параметры из вашего оригинального кода
         params = {
-            "iterations": 10000,
+            "iterations": 3000,
             "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 10.0,
