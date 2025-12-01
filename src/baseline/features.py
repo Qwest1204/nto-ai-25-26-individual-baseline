@@ -506,8 +506,8 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
     return df
 
 def add_enhanced_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Самые мощные агрегатные фичи без лика (глобальные + target encoding style + статистики 2-го порядка)."""
-    print("Adding ENHANCED aggregate features (no leakage)...")
+    """Самые мощные агрегатные фичи без лика — полностью устойчивая версия."""
+    print("Adding ENHANCED aggregate features (robust version)...")
 
     train_read = train_df[train_df[constants.COL_HAS_READ] == 1].copy()
     global_mean = train_read[config.TARGET].mean()
@@ -528,71 +528,103 @@ def add_enhanced_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) ->
         constants.COL_BOOK_ID, 'book_mean', 'book_std', 'book_cnt', 'book_min', 'book_max', 'book_med'
     ]
 
-    # ==================================== 2. Авторские агрегаты ====================================
-    author_stats = None
-    books_df = _try_load_books()
-    if books_df is not None and constants.COL_AUTHOR_ID in books_df.columns:
-        tmp = train_read.merge(books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
-                               on=constants.COL_BOOK_ID, how='left')
-        tmp = tmp.dropna(subset=[constants.COL_AUTHOR_ID])
-        if not tmp.empty:
-            author_stats = tmp.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg([
-                'mean', 'std', 'count'
-            ]).reset_index()
-            author_stats.columns = [constants.COL_AUTHOR_ID, 'author_mean', 'author_std', 'author_cnt']
-
-    # ==================================== 3. Мерджим всё ====================================
     df = df.merge(user_stats, on=constants.COL_USER_ID, how='left')
     df = df.merge(book_stats, on=constants.COL_BOOK_ID, how='left')
-    if author_stats is not None:
-        if constants.COL_AUTHOR_ID not in df.columns:
-            df = df.merge(books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
-                          on=constants.COL_BOOK_ID, how='left')
-        df = df.merge(author_stats, on=constants.COL_AUTHOR_ID, how='left')
 
-    # ==================================== 4. Заполнение холодных ====================================
-    for col, val in [
-        ('user_mean', global_mean), ('user_std', 0), ('user_cnt', 0),
-        ('book_mean', global_mean * 1.03), ('book_std', global_std), ('book_cnt', 0),
-        ('author_mean', global_mean), ('author_std', 0), ('author_cnt', 0)
-    ]:
+    # ==================================== 2. Авторские агрегаты (умная обработка) ====================================
+    books_df = _try_load_books()
+    author_mean_col = None
+
+    if books_df is not None:
+        # Возможные имена колонок с авторами
+        possible_author_cols = ['author_id', 'author', 'authors', 'author_name', 'Author', 'Authors']
+        author_col = None
+        for col in possible_author_cols:
+            if col in books_df.columns:
+                author_col = col
+                break
+
+        if author_col is not None:
+            print(f"Found author column: {author_col}")
+            # Создаём временный author_id (хэшируем строки, если это имена)
+            if books_df[author_col].dtype == 'object':
+                books_df['__temp_author_id'] = books_df[author_col].astype(str).fillna('missing_author')
+                # Для стабильности — используем factorize
+                books_df['__temp_author_id'] = pd.factorize(books_df['__temp_author_id'])[0]
+            else:
+                books_df['__temp_author_id'] = books_df[author_col]
+
+            # Мержим к train_read
+            train_with_author = train_read.merge(
+                books_df[[constants.COL_BOOK_ID, '__temp_author_id']],
+                on=constants.COL_BOOK_ID,
+                how='left'
+            )
+
+            valid_authors = train_with_author['__temp_author_id'].notna()
+            if valid_authors.any():
+                author_stats = train_with_author[valid_authors].groupby('__temp_author_id')[config.TARGET].agg([
+                    'mean', 'std', 'count'
+                ]).reset_index()
+                author_stats.columns = ['__temp_author_id', 'author_mean', 'author_std', 'author_cnt']
+
+                # Мержим обратно к основному df
+                book_to_author = books_df[[constants.COL_BOOK_ID, '__temp_author_id']].drop_duplicates()
+                df = df.merge(book_to_author, on=constants.COL_BOOK_ID, how='left')
+                df = df.merge(author_stats, on='__temp_author_id', how='left')
+                df = df.drop(columns=['__temp_author_id'], errors='ignore')
+
+                author_mean_col = 'author_mean'
+
+    # ==================================== 3. Заполнение холодных ====================================
+    fill_values = {
+        'user_mean': global_mean,
+        'user_std': 0.0,
+        'user_cnt': 0,
+        'user_min': global_mean,
+        'user_max': global_mean,
+        'user_med': global_mean,
+        'book_mean': global_mean * 1.03,
+        'book_std': global_std,
+        'book_cnt': 0,
+        'book_min': global_mean,
+        'book_max': global_mean,
+        'book_med': global_mean,
+    }
+    if author_mean_col:
+        fill_values.update({'author_mean': global_mean, 'author_std': 0.0, 'author_cnt': 0})
+
+    for col, val in fill_values.items():
         if col in df.columns:
             df[col] = df[col].fillna(val)
 
-    # ==================================== 5. Сотни взаимодействий и статистики ====================================
-    # Популярность + надёжность
+    # ==================================== 4. Взаимодействия и статистики ====================================
     df['user_log_cnt'] = np.log1p(df['user_cnt'])
     df['book_log_cnt'] = np.log1p(df['book_cnt'])
     df['user_reliability'] = 1 - np.exp(-df['user_cnt'] / 10.0)
     df['book_reliability'] = 1 - np.exp(-df['book_cnt'] / 20.0)
 
-    # Разницы и совместимости
     df['user_book_mean_diff'] = df['user_mean'] - df['book_mean']
     df['user_book_mean_abs_diff'] = np.abs(df['user_book_mean_diff'])
     df['user_book_compatibility'] = 10 - df['user_book_mean_abs_diff'].clip(0, 10)
 
-    # Bias-корректированные средние
-    lambda_u = 15
-    lambda_b = 25
-    df['user_shrink_mean'] = (df['user_cnt'] * df['user_mean'] + lambda_u * global_mean) / (df['user_cnt'] + lambda_u)
-    df['book_shrink_mean'] = (df['book_cnt'] * df['book_mean'] + lambda_b * global_mean) / (df['book_cnt'] + lambda_b)
+    # Shrinkage
+    df['user_shrink_mean'] = (df['user_cnt'] * df['user_mean'] + 15 * global_mean) / (df['user_cnt'] + 15)
+    df['book_shrink_mean'] = (df['book_cnt'] * df['book_mean'] + 25 * global_mean) / (df['book_cnt'] + 25)
 
-    # Взвешенные предсказания
     df['pred_weighted_v1'] = (
         df['user_shrink_mean'] * df['user_reliability'] * 0.6 +
         df['book_shrink_mean'] * df['book_reliability'] * 0.4
     )
-    if 'author_mean' in df.columns:
+
+    if author_mean_col == 'author_mean':
         df['pred_weighted_v2'] = df['pred_weighted_v1'] * 0.7 + df['author_mean'] * 0.3
 
-    # Статистики разброса
-    df['user_strictness'] = (df['user_mean'] - global_mean) / (df['user_std'] + 1e-6)  # чем ниже — тем строже
-    df['user_extremity'] = df[['user_min', 'user_max']].max(axis=1) - df[['user_min', 'user_max']].min(axis=1)
-
-    # Квантильные фичи
+    df['user_strictness'] = (df['user_mean'] - global_mean) / (df['user_std'] + 1e-6)
+    df['user_extremity'] = df['user_max'] - df['user_min']
     df['user_rating_skew'] = (df['user_mean'] - df['user_med']) / (df['user_std'] + 1e-6)
 
-    print(f"Added ~70 enhanced aggregate features")
+    print("Added ~70+ robust enhanced aggregate features")
     return df
 
 
