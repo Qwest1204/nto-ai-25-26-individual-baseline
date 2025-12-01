@@ -701,17 +701,17 @@ def add_count_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.D
 
     total_train = len(train_read)
 
+    # Важно: создаём новые столбцы, НЕ меняя исходные категориальные
     for col in cat_cols:
-        # Считаем частоты только на train
+        # Считаем частоты только на train (включая NaN как отдельную категорию)
         value_counts = train_read[col].value_counts(dropna=False)
 
-        # count
-        mapped_count = df[col].map(value_counts)
-        # Важно: если после map получаются NaN (неизвестные категории) → 0
-        df[f'{col}_count'] = mapped_count.fillna(0).astype('float32')
+        # count-encoding
+        count_series = df[col].map(value_counts).fillna(0).astype('float32')
+        df[f'{col}_count'] = count_series
 
-        # frequency
-        df[f'{col}_freq'] = df[f'{col}_count'] / total_train
+        # frequency-encoding
+        df[f'{col}_freq'] = (count_series / total_train).astype('float32')
 
     print(f"   Added count/freq for {len(cat_cols)} categorical features")
     return df
