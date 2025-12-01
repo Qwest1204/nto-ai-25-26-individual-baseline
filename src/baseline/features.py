@@ -686,16 +686,34 @@ def add_nmf_topic_features(df: pd.DataFrame, train_df: pd.DataFrame, n_component
 
 
 def add_count_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Count encoding для всех категориальных фич (location, publisher, etc.)."""
+    """
+    Count-encoding + frequency-encoding для всех категориальных признаков.
+    Работает с category/object колонками, не ломает типы.
+    """
     print("Adding count-encoded categorical features...")
     train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
 
-    for col in config.CAT_FEATURES + ['location_city', 'location_state', 'location_country', 'publisher']:
-        if col not in train_df.columns and col not in df.columns:
-            continue
-        cnt = train_read[col].value_counts()
-        df[f'{col}_count'] = df[col].map(cnt).fillna(0)
-        df[f'{col}_freq'] = df[col].map(cnt / len(train_read))
+    # Список колонок, по которым будем делать count-encoding
+    cat_cols = []
+    for col in config.CAT_FEATURES + ['location_city', 'location_state', 'location_country', 'publisher', 'author']:
+        if col in df.columns:
+            cat_cols.append(col)
+
+    total_train = len(train_read)
+
+    for col in cat_cols:
+        # Считаем частоты только на train
+        value_counts = train_read[col].value_counts(dropna=False)
+
+        # count
+        mapped_count = df[col].map(value_counts)
+        # Важно: если после map получаются NaN (неизвестные категории) → 0
+        df[f'{col}_count'] = mapped_count.fillna(0).astype('float32')
+
+        # frequency
+        df[f'{col}_freq'] = df[f'{col}_count'] / total_train
+
+    print(f"   Added count/freq for {len(cat_cols)} categorical features")
     return df
 
 
