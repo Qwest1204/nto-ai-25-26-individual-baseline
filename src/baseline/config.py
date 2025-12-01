@@ -30,7 +30,7 @@ TARGET = constants.COL_TARGET  # Alias for consistency
 # --- TEMPORAL SPLIT CONFIG ---
 # Ratio of data to use for training (0 < TEMPORAL_SPLIT_RATIO < 1)
 # 0.8 means 80% of data points (by timestamp) go to train, 20% to validation
-TEMPORAL_SPLIT_RATIO = 0.95
+TEMPORAL_SPLIT_RATIO = 0.92
 
 # --- TRAINING CONFIG ---
 EARLY_STOPPING_ROUNDS = 400
@@ -38,7 +38,7 @@ MODEL_FILENAME_PATTERN = "lgb_fold_{fold}.txt"  # Deprecated: kept for backwards
 MODEL_FILENAME = "lgb_model.txt"  # Single model filename for temporal split
 
 # --- TF-IDF PARAMETERS ---
-TFIDF_MAX_FEATURES = 150
+TFIDF_MAX_FEATURES = 120
 TFIDF_MIN_DF = 20
 TFIDF_MAX_DF = 0.95
 TFIDF_NGRAM_RANGE = (1, 2)
