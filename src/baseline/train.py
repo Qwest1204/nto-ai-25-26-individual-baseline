@@ -131,14 +131,14 @@ def train(tune_hyperparams: bool = False) -> None:
         # Фиксированные параметры из вашего оригинального кода
         params = {
             "iterations": 3000,
-            "learning_rate": 0.03,
-            "depth": 6,
-            "l2_leaf_reg": 10.0,
-            "bagging_temperature": 1.0,
-            "random_strength": 1.0,
-            "border_count": 254,
+            "learning_rate": 0.025925320737058073,
+            "depth": 4,
+            "l2_leaf_reg": 14.175740136108939,
+            "bagging_temperature": 1.6601307512092365,
+            "random_strength": 1.8073991932502391,
+            "border_count": 151,
             "grow_policy": "Lossguide",
-            "min_data_in_leaf": 5,
+            "min_data_in_leaf": 8,
             "loss_function": "RMSEWithUncertainty",
             "eval_metric": "RMSE",
             "od_type": "Iter",
@@ -177,4 +177,4 @@ def train(tune_hyperparams: bool = False) -> None:
 
 if __name__ == "__main__":
     # Установите tune_hyperparams=True для запуска тюнинга
-    train(tune_hyperparams=True)
+    train(tune_hyperparams=False)
