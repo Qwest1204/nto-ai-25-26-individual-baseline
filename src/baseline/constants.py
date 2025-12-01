@@ -94,6 +94,7 @@ COL_PUBLISHER = "publisher"
 COL_AVG_RATING = "avg_rating"
 COL_GENRE_ID = "genre_id"
 COL_DESCRIPTION = "description"
+COL_YEAR = "year"
 
 
 # --- VALUES ---

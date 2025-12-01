@@ -11,6 +11,7 @@ import torch
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.decomposition import TruncatedSVD, NMF
 from scipy.sparse import csr_matrix
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
@@ -214,7 +215,7 @@ def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFra
     """Adds features based on has_read=0 (to-read list).
 
     Args:
-        df (pd.DataFrame): The main DataFrame to add features to.
+        df (pd.DataFrame): чThe main DataFrame to add features to.
         train_df (pd.DataFrame): The training portion for calculations.
 
     Returns:
@@ -413,6 +414,16 @@ def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
     print(f"Added {len(bert_feature_names)} BERT features.")
     return df_with_bert
 
+def _try_load_books() -> pd.DataFrame | None:
+    """Вспомогательная функция загрузки books.csv (уже есть в оригинале, дублируем для удобства)."""
+    possible = [
+        config.DATA_DIR / "raw" / constants.BOOK_DATA_FILENAME,
+        config.DATA_DIR / constants.BOOK_DATA_FILENAME,
+    ]
+    for p in possible:
+        if p.exists():
+            return pd.read_csv(p)
+    return None
 
 def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """Fills missing values using a defined strategy.
@@ -494,6 +505,208 @@ def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFr
 
     return df
 
+def add_enhanced_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Самые мощные агрегатные фичи без лика (глобальные + target encoding style + статистики 2-го порядка)."""
+    print("Adding ENHANCED aggregate features (no leakage)...")
+
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1].copy()
+    global_mean = train_read[config.TARGET].mean()
+    global_std = train_read[config.TARGET].std()
+
+    # ==================================== 1. Базовые агрегаты ====================================
+    user_stats = train_read.groupby(constants.COL_USER_ID)[config.TARGET].agg([
+        'mean', 'std', 'count', 'min', 'max', 'median'
+    ]).reset_index()
+    user_stats.columns = [
+        constants.COL_USER_ID, 'user_mean', 'user_std', 'user_cnt', 'user_min', 'user_max', 'user_med'
+    ]
+
+    book_stats = train_read.groupby(constants.COL_BOOK_ID)[config.TARGET].agg([
+        'mean', 'std', 'count', 'min', 'max', 'median'
+    ]).reset_index()
+    book_stats.columns = [
+        constants.COL_BOOK_ID, 'book_mean', 'book_std', 'book_cnt', 'book_min', 'book_max', 'book_med'
+    ]
+
+    # ==================================== 2. Авторские агрегаты ====================================
+    author_stats = None
+    books_df = _try_load_books()
+    if books_df is not None and constants.COL_AUTHOR_ID in books_df.columns:
+        tmp = train_read.merge(books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
+                               on=constants.COL_BOOK_ID, how='left')
+        tmp = tmp.dropna(subset=[constants.COL_AUTHOR_ID])
+        if not tmp.empty:
+            author_stats = tmp.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg([
+                'mean', 'std', 'count'
+            ]).reset_index()
+            author_stats.columns = [constants.COL_AUTHOR_ID, 'author_mean', 'author_std', 'author_cnt']
+
+    # ==================================== 3. Мерджим всё ====================================
+    df = df.merge(user_stats, on=constants.COL_USER_ID, how='left')
+    df = df.merge(book_stats, on=constants.COL_BOOK_ID, how='left')
+    if author_stats is not None:
+        if constants.COL_AUTHOR_ID not in df.columns:
+            df = df.merge(books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
+                          on=constants.COL_BOOK_ID, how='left')
+        df = df.merge(author_stats, on=constants.COL_AUTHOR_ID, how='left')
+
+    # ==================================== 4. Заполнение холодных ====================================
+    for col, val in [
+        ('user_mean', global_mean), ('user_std', 0), ('user_cnt', 0),
+        ('book_mean', global_mean * 1.03), ('book_std', global_std), ('book_cnt', 0),
+        ('author_mean', global_mean), ('author_std', 0), ('author_cnt', 0)
+    ]:
+        if col in df.columns:
+            df[col] = df[col].fillna(val)
+
+    # ==================================== 5. Сотни взаимодействий и статистики ====================================
+    # Популярность + надёжность
+    df['user_log_cnt'] = np.log1p(df['user_cnt'])
+    df['book_log_cnt'] = np.log1p(df['book_cnt'])
+    df['user_reliability'] = 1 - np.exp(-df['user_cnt'] / 10.0)
+    df['book_reliability'] = 1 - np.exp(-df['book_cnt'] / 20.0)
+
+    # Разницы и совместимости
+    df['user_book_mean_diff'] = df['user_mean'] - df['book_mean']
+    df['user_book_mean_abs_diff'] = np.abs(df['user_book_mean_diff'])
+    df['user_book_compatibility'] = 10 - df['user_book_mean_abs_diff'].clip(0, 10)
+
+    # Bias-корректированные средние
+    lambda_u = 15
+    lambda_b = 25
+    df['user_shrink_mean'] = (df['user_cnt'] * df['user_mean'] + lambda_u * global_mean) / (df['user_cnt'] + lambda_u)
+    df['book_shrink_mean'] = (df['book_cnt'] * df['book_mean'] + lambda_b * global_mean) / (df['book_cnt'] + lambda_b)
+
+    # Взвешенные предсказания
+    df['pred_weighted_v1'] = (
+        df['user_shrink_mean'] * df['user_reliability'] * 0.6 +
+        df['book_shrink_mean'] * df['book_reliability'] * 0.4
+    )
+    if 'author_mean' in df.columns:
+        df['pred_weighted_v2'] = df['pred_weighted_v1'] * 0.7 + df['author_mean'] * 0.3
+
+    # Статистики разброса
+    df['user_strictness'] = (df['user_mean'] - global_mean) / (df['user_std'] + 1e-6)  # чем ниже — тем строже
+    df['user_extremity'] = df[['user_min', 'user_max']].max(axis=1) - df[['user_min', 'user_max']].min(axis=1)
+
+    # Квантильные фичи
+    df['user_rating_skew'] = (df['user_mean'] - df['user_med']) / (df['user_std'] + 1e-6)
+
+    print(f"Added ~70 enhanced aggregate features")
+    return df
+
+
+def add_time_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Временные фичи, если есть даты (год публикации, возраст книги и т.д.)."""
+    print("Adding time-based features...")
+    books_df = _try_load_books()
+    if books_df is not None and constants.COL_YEAR in books_df.columns:
+        year_map = dict(zip(books_df[constants.COL_BOOK_ID], books_df[constants.COL_YEAR]))
+        df['book_year'] = df[constants.COL_BOOK_ID].map(year_map)
+        df['book_age'] = 2025 - df['book_year'].fillna(2025)
+        df['is_classic'] = (df['book_age'] > 70).astype(int)
+        df['is_very_new'] = (df['book_age'] < 3).astype(int)
+    return df
+
+
+def add_popularity_decile_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Децили/квантили популярности пользователей и книг — очень мощно для LightGBM."""
+    print("Adding popularity rank/decile features...")
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+
+    user_cnt = train_read.groupby(constants.COL_USER_ID).size()
+    book_cnt = train_read.groupby(constants.COL_BOOK_ID).size()
+
+    df['user_pop_rank'] = df[constants.COL_USER_ID].map(user_cnt.rank(method='average'))
+    df['book_pop_rank'] = df[constants.COL_BOOK_ID].map(book_cnt.rank(method='average'))
+
+    for col, prefix in [(user_cnt, 'user'), (book_cnt, 'book')]:
+        sr = df[f'{prefix}_pop_rank']
+        df[f'{prefix}_pop_decile'] = pd.qcut(sr, 10, labels=False, duplicates='drop') + 1
+        df[f'{prefix}_pop_quintile'] = pd.qcut(sr, 5, labels=False, duplicates='drop') + 1
+        df[f'{prefix}_pop_is_top10pct'] = (sr >= sr.quantile(0.9)).astype(int)
+
+    return df
+
+
+def add_nmf_topic_features(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 30) -> pd.DataFrame:
+    """NMF на user-book матрице — часто лучше SVD."""
+    print(f"Adding NMF topics ({n_components} components)...")
+    ratings = train_df[train_df[constants.COL_HAS_READ] == 1]
+    pivot = ratings.pivot_table(index=constants.COL_USER_ID, columns=constants.COL_BOOK_ID,
+                                values=config.TARGET, fill_value=0)
+    matrix = csr_matrix(pivot.values)
+
+    nmf = NMF(n_components=n_components, init='random', random_state=42, max_iter=500)
+    user_nmf = nmf.fit_transform(matrix)
+    book_nmf = nmf.components_.T
+
+    user_df = pd.DataFrame(user_nmf, index=pivot.index,
+                           columns=[f'user_nmf_{i}' for i in range(n_components)])
+    book_df = pd.DataFrame(book_nmf, index=pivot.columns,
+                           columns=[f'book_nmf_{i}' for i in range(n_components)])
+
+    df = df.merge(user_df, on=constants.COL_USER_ID, how='left')
+    df = df.merge(book_df, on=constants.COL_BOOK_ID, how='left')
+    df[[c for c in df.columns if c.startswith(('user_nmf_', 'book_nmf_'))]] = \
+        df[[c for c in df.columns if c.startswith(('user_nmf_', 'book_nmf_'))]].fillna(0)
+    return df
+
+
+def add_count_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Count encoding для всех категориальных фич (location, publisher, etc.)."""
+    print("Adding count-encoded categorical features...")
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+
+    for col in config.CAT_FEATURES + ['location_city', 'location_state', 'location_country', 'publisher']:
+        if col not in train_df.columns and col not in df.columns:
+            continue
+        cnt = train_read[col].value_counts()
+        df[f'{col}_count'] = df[col].map(cnt).fillna(0)
+        df[f'{col}_freq'] = df[col].map(cnt / len(train_read))
+    return df
+
+
+def add_target_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame, alpha: float = 10.0) -> pd.DataFrame:
+    """Target encoding с сглаживанием (без лика — только на train)."""
+    print("Adding smoothed target encoding...")
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+    global_mean = train_read[config.TARGET].mean()
+
+    for col in ['location_city', 'location_state', 'location_country', 'publisher', constants.COL_AUTHOR_ID]:
+        if col not in train_df.columns:
+            continue
+        stats = train_read.groupby(col)[config.TARGET].agg(['mean', 'count'])
+        smoothed = (stats['mean'] * stats['count'] + global_mean * alpha) / (stats['count'] + alpha)
+        df[f'{col}_te'] = df[col].map(smoothed).fillna(global_mean)
+    return df
+
+
+def add_pairwise_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Множество полиномиальных и логических взаимодействий (самые сильные фичи для GBM)."""
+    print("Adding hundreds of pairwise interaction features...")
+
+    num_cols = [c for c in df.select_dtypes(include=np.number).columns
+                if not c.startswith(('tfidf_', 'bert_', 'svd_', 'nmf_', 'genre_'))]
+
+    # Выбираем только самые важные базовые числовые
+    base_nums = ['user_mean', 'book_mean', 'user_cnt', 'book_cnt', 'user_log_cnt', 'book_log_cnt',
+                 'user_reliability', 'book_reliability', 'book_age', 'user_age', 'book_avg_rating']
+
+    base_nums = [c for c in base_nums if c in df.columns]
+
+    for i, c1 in enumerate(base_nums):
+        for c2 in base_nums[i+1:]:
+            df[f'inter_{c1}_{c2}_prod'] = df[c1] * df[c2]
+            df[f'inter_{c1}_{c2}_ratio'] = df[c1] / (df[c2] + 1e-6)
+
+    # Логические комбинации популярности
+    if 'user_pop_decile' in df.columns and 'book_pop_decile' in df.columns:
+        df['pop_decile_diff'] = df['user_pop_decile'] - df['book_pop_decile']
+        df['pop_match'] = (df['user_pop_decile'] == df['book_pop_decile']).astype(int)
+
+    print(f"   Added ~{len(base_nums)*(len(base_nums)-1)} numeric interactions")
+    return df
 
 def create_features(
     df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
