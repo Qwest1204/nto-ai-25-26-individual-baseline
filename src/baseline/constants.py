@@ -95,6 +95,9 @@ COL_AVG_RATING = "avg_rating"
 COL_GENRE_ID = "genre_id"
 COL_DESCRIPTION = "description"
 
+F_USER_STD_RATING = "user_std_rating"
+F_BOOK_STD_RATING = "book_std_rating"
+F_AUTHOR_STD_RATING = "user_std_rating"
 
 # --- VALUES ---
 VAL_SOURCE_TRAIN = "train"

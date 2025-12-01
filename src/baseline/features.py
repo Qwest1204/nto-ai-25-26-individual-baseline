@@ -20,46 +20,45 @@ from . import config, constants
 
 def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Безопасные агрегатные фичи без leakage.
-    Использует только существующие константы.
+    Adds safe aggregate features without data leakage.
+    Utilizes only existing constants and training data to compute aggregates.
     """
     print("Adding safe aggregate features...")
 
-    # Используем только прочитанные книги для вычисления агрегатов
+    # Filter to use only read books for computing aggregates
     train_read = train_df[train_df[constants.COL_HAS_READ] == 1].copy()
 
-    # Глобальные статистики
+    # Compute global statistics
     global_mean = train_read[config.TARGET].mean()
     global_std = train_read[config.TARGET].std()
 
-    # 1. User aggregates (только базовые, безопасные)
-    user_agg = train_read.groupby(constants.COL_USER_ID)[config.TARGET].agg(['mean', 'count']).reset_index()
+    # 1. Compute user aggregates (basic and safe)
+    user_agg = train_read.groupby(constants.COL_USER_ID)[config.TARGET].agg(['mean', 'std', 'count']).reset_index()
     user_agg.columns = [
         constants.COL_USER_ID,
         constants.F_USER_MEAN_RATING,
+        constants.F_USER_STD_RATING,
         constants.F_USER_RATINGS_COUNT
     ]
 
-    # 2. Book aggregates (только базовые, безопасные)
-    book_agg = train_read.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(['mean', 'count']).reset_index()
+    # 2. Compute book aggregates (basic and safe)
+    book_agg = train_read.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(['mean', 'std', 'count']).reset_index()
     book_agg.columns = [
         constants.COL_BOOK_ID,
         constants.F_BOOK_MEAN_RATING,
+        constants.F_BOOK_STD_RATING,
         constants.F_BOOK_RATINGS_COUNT
     ]
 
-    # 3. Author aggregates (если можем загрузить books.csv)
+    # 3. Compute author aggregates if books data is available
     author_agg = None
     books_df = None
-
-    # Пробуем несколько возможных путей
+    # Define possible paths for books data
     possible_paths = [
-        config.DATA_DIR / "raw" / constants.BOOK_DATA_FILENAME,  # data/raw/books.csv
-        config.DATA_DIR / constants.BOOK_DATA_FILENAME,  # data/books.csv
-        #Path("D:\\br\\data\\raw\\books.csv"),  # Абсолютный путь
-        #Path("data/raw/books.csv"),  # Относительный путь
+        config.DATA_DIR / "raw" / constants.BOOK_DATA_FILENAME,
+        config.DATA_DIR / constants.BOOK_DATA_FILENAME,
+        #Path("data/raw/books.csv"),  # Relative path
     ]
-
     books_path = None
     for path in possible_paths:
         if path.exists():
@@ -70,106 +69,116 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
         try:
             books_df = pd.read_csv(books_path)
             print(f"Loaded books data from {books_path}")
-
             if constants.COL_AUTHOR_ID in books_df.columns:
-                # Мержим author_id к train_read
+                # Merge author_id to training data
                 train_with_author = train_read.merge(
                     books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
                     on=constants.COL_BOOK_ID,
                     how='left'
                 )
-
-                # Убираем книги без автора
+                # Remove entries without author
                 train_with_author = train_with_author.dropna(subset=[constants.COL_AUTHOR_ID])
-
                 if not train_with_author.empty:
-                    author_agg = train_with_author.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(
-                        ['mean']).reset_index()
-                    author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING]
+                    author_agg = train_with_author.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(['mean', 'std', 'count']).reset_index()
+                    author_agg.columns = [
+                        constants.COL_AUTHOR_ID,
+                        constants.F_AUTHOR_MEAN_RATING,
+                        constants.F_AUTHOR_STD_RATING,
+                        constants.F_AUTHOR_RATINGS_COUNT
+                    ]
                     print(f"Computed aggregates for {len(author_agg)} authors")
         except Exception as e:
             print(f"Error loading books data: {e}")
     else:
-        print(f"Books file not found. Tried paths: {possible_paths}")
+        print(f"Books file not found. Tried paths: {[str(p) for p in possible_paths]}")
         print(f"Current DATA_DIR: {config.DATA_DIR}")
         print(f"DATA_DIR exists: {config.DATA_DIR.exists()}")
 
-    # 4. Мержим все агрегаты
+    # 4. Merge all aggregates into the input DataFrame
     print("Merging aggregates...")
-
-    # User aggregates
+    # Merge user aggregates
     df = df.merge(user_agg, on=constants.COL_USER_ID, how='left')
-    print(f"  Merged user aggregates: {len(user_agg)} users")
-
-    # Book aggregates
+    print(f" Merged user aggregates: {len(user_agg)} users")
+    # Merge book aggregates
     df = df.merge(book_agg, on=constants.COL_BOOK_ID, how='left')
-    print(f"  Merged book aggregates: {len(book_agg)} books")
-
-    # Author aggregates (если есть)
+    print(f" Merged book aggregates: {len(book_agg)} books")
+    # Merge author aggregates if available
     if author_agg is not None and not author_agg.empty:
-        # Сначала мержим author_id к df из books_df
+        # Ensure author_id is in df if not already present
         if constants.COL_AUTHOR_ID not in df.columns and books_df is not None:
             df = df.merge(
                 books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
                 on=constants.COL_BOOK_ID,
                 how='left'
             )
-
         if constants.COL_AUTHOR_ID in df.columns:
             df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how='left')
-            print(f"  Merged author aggregates: {len(author_agg)} authors")
+            print(f" Merged author aggregates: {len(author_agg)} authors")
 
-    # 5. Заполняем пропуски стратегически
+    # 5. Handle missing values strategically
     print("Handling NaN values...")
-
-    # Для пользователей без истории
+    # For users without history
     user_na_mask = df[constants.F_USER_MEAN_RATING].isna()
     if user_na_mask.any():
         df.loc[user_na_mask, constants.F_USER_MEAN_RATING] = global_mean
+        df.loc[user_na_mask, constants.F_USER_STD_RATING] = global_std
         df.loc[user_na_mask, constants.F_USER_RATINGS_COUNT] = 0
-        print(f"  Filled {user_na_mask.sum()} missing user aggregates")
-
-    # Для книг без истории
+        print(f" Filled {user_na_mask.sum()} missing user aggregates")
+    # For books without history
     book_na_mask = df[constants.F_BOOK_MEAN_RATING].isna()
     if book_na_mask.any():
-        df.loc[book_na_mask, constants.F_BOOK_MEAN_RATING] = global_mean * 1.05  # benefit of doubt
+        df.loc[book_na_mask, constants.F_BOOK_MEAN_RATING] = global_mean * 1.05  # Benefit of doubt for new books
+        df.loc[book_na_mask, constants.F_BOOK_STD_RATING] = global_std
         df.loc[book_na_mask, constants.F_BOOK_RATINGS_COUNT] = 0
-        print(f"  Filled {book_na_mask.sum()} missing book aggregates")
-
-    # Для авторов без истории
+        print(f" Filled {book_na_mask.sum()} missing book aggregates")
+    # For authors without history
     if constants.F_AUTHOR_MEAN_RATING in df.columns:
         author_na_mask = df[constants.F_AUTHOR_MEAN_RATING].isna()
         if author_na_mask.any():
             df.loc[author_na_mask, constants.F_AUTHOR_MEAN_RATING] = global_mean
-            print(f"  Filled {author_na_mask.sum()} missing author aggregates")
+            df.loc[author_na_mask, constants.F_AUTHOR_STD_RATING] = global_std
+            df.loc[author_na_mask, constants.F_AUTHOR_RATINGS_COUNT] = 0
+            print(f" Filled {author_na_mask.sum()} missing author aggregates")
 
-    # 6. Добавляем простые комбинации (безопасные)
+    # 6. Create safe interaction features
     print("Creating interaction features...")
-
-    # Разница между средним пользователя и книги
+    # Difference between user mean and book mean
     df['user_book_rating_diff'] = df[constants.F_USER_MEAN_RATING] - df[constants.F_BOOK_MEAN_RATING]
-
-    # Абсолютная разница
+    # Absolute difference
     df['user_book_rating_abs_diff'] = df['user_book_rating_diff'].abs()
-
-    # Совместимость (чем меньше разница, тем выше совместимость)
+    # Compatibility score (higher when difference is smaller)
     df['user_book_compatibility'] = 10 - df['user_book_rating_abs_diff']
-
-    # Произведение популярности (log scale для уменьшения skew)
+    # Log-transformed popularity
     df['user_popularity_log'] = np.log1p(df[constants.F_USER_RATINGS_COUNT])
     df['book_popularity_log'] = np.log1p(df[constants.F_BOOK_RATINGS_COUNT])
+    # Product of popularity logs
     df['user_book_popularity_product'] = df['user_popularity_log'] * df['book_popularity_log']
-
-    # Reliability пользователя (чем больше оценок, тем надежнее)
+    # User reliability (sigmoid-like based on count)
     df['user_reliability'] = 1 - np.exp(-df[constants.F_USER_RATINGS_COUNT] / 5)
-
-    # Reliability книги
+    # Book reliability
     df['book_reliability'] = 1 - np.exp(-df[constants.F_BOOK_RATINGS_COUNT] / 10)
-
-    # Combined reliability
-    df['combined_reliability'] = df['user_reliability'] * 0.6 + df['book_reliability'] * 0.4
-
-    # Ожидаемый рейтинг (взвешенная комбинация)
+    # Author reliability if available
+    if constants.F_AUTHOR_RATINGS_COUNT in df.columns:
+        df['author_reliability'] = 1 - np.exp(-df[constants.F_AUTHOR_RATINGS_COUNT] / 8)
+    # Combined reliability (weighted)
+    if constants.F_AUTHOR_RATINGS_COUNT in df.columns:
+        df['combined_reliability'] = (
+            df['user_reliability'] * 0.5 +
+            df['book_reliability'] * 0.3 +
+            df['author_reliability'] * 0.2
+        )
+    else:
+        df['combined_reliability'] = df['user_reliability'] * 0.6 + df['book_reliability'] * 0.4
+    # User harshness
+    df['user_harshness'] = df[constants.F_USER_MEAN_RATING] - global_mean
+    # Book appeal
+    df['book_appeal'] = df[constants.F_BOOK_MEAN_RATING] - global_mean
+    # Author appeal if available
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        df['author_appeal'] = df[constants.F_AUTHOR_MEAN_RATING] - global_mean
+    # Std difference
+    df['user_book_std_diff'] = df[constants.F_USER_STD_RATING] - df[constants.F_BOOK_STD_RATING]
+    # Expected rating (weighted combination)
     if constants.F_AUTHOR_MEAN_RATING in df.columns:
         df['expected_rating'] = (
             df[constants.F_USER_MEAN_RATING] * 0.4 +
@@ -181,31 +190,46 @@ def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataF
             df[constants.F_USER_MEAN_RATING] * 0.5 +
             df[constants.F_BOOK_MEAN_RATING] * 0.5
         )
-
-    # Ограничиваем ожидаемый рейтинг диапазоном 0-10
+    # Clip expected rating to valid range
     df['expected_rating'] = df['expected_rating'].clip(0, 10)
 
-    # 7. Статистика по добавленным фичам
+    # 7. Report statistics on added features
     feature_cols = [
-        constants.F_USER_MEAN_RATING, constants.F_USER_RATINGS_COUNT,
-        constants.F_BOOK_MEAN_RATING, constants.F_BOOK_RATINGS_COUNT,
-        'user_book_rating_diff', 'user_book_rating_abs_diff',
-        'user_book_compatibility', 'user_book_popularity_product',
-        'user_reliability', 'book_reliability', 'combined_reliability',
+        constants.F_USER_MEAN_RATING,
+        constants.F_USER_STD_RATING,
+        constants.F_USER_RATINGS_COUNT,
+        constants.F_BOOK_MEAN_RATING,
+        constants.F_BOOK_STD_RATING,
+        constants.F_BOOK_RATINGS_COUNT,
+        'user_book_rating_diff',
+        'user_book_rating_abs_diff',
+        'user_book_compatibility',
+        'user_book_popularity_product',
+        'user_reliability',
+        'book_reliability',
+        'combined_reliability',
+        'user_harshness',
+        'book_appeal',
+        'user_book_std_diff',
         'expected_rating'
     ]
-
-    # Добавляем author фичу, если есть
     if constants.F_AUTHOR_MEAN_RATING in df.columns:
-        feature_cols.append(constants.F_AUTHOR_MEAN_RATING)
-
+        feature_cols.extend([
+            constants.F_AUTHOR_MEAN_RATING,
+            constants.F_AUTHOR_STD_RATING,
+            constants.F_AUTHOR_RATINGS_COUNT,
+            'author_appeal'
+        ])
+    if 'author_reliability' in df.columns:
+        feature_cols.append('author_reliability')
     num_features = len([c for c in feature_cols if c in df.columns])
-
     print(f"✅ Added {num_features} safe aggregate features")
-    print(f"   Global mean: {global_mean:.3f}")
-    print(f"   Global std: {global_std:.3f}")
-    print(f"   User coverage: {(~user_na_mask).mean():.2%}")
-    print(f"   Book coverage: {(~book_na_mask).mean():.2%}")
+    print(f" Global mean: {global_mean:.3f}")
+    print(f" Global std: {global_std:.3f}")
+    print(f" User coverage: {(~user_na_mask).mean():.2%}")
+    print(f" Book coverage: {(~book_na_mask).mean():.2%}")
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        print(f" Author coverage: {(~author_na_mask).mean():.2%}")
 
     return df
 
