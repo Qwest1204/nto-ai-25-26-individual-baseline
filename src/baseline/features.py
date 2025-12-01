@@ -688,30 +688,31 @@ def add_nmf_topic_features(df: pd.DataFrame, train_df: pd.DataFrame, n_component
 def add_count_encoded_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
     """
     Count-encoding + frequency-encoding для всех категориальных признаков.
-    Работает с category/object колонками, не ломает типы.
+    Полностью совместима с pandas.Categorical.
     """
     print("Adding count-encoded categorical features...")
     train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+    total_train = len(train_read)
 
-    # Список колонок, по которым будем делать count-encoding
     cat_cols = []
     for col in config.CAT_FEATURES + ['location_city', 'location_state', 'location_country', 'publisher', 'author']:
         if col in df.columns:
             cat_cols.append(col)
 
-    total_train = len(train_read)
-
-    # Важно: создаём новые столбцы, НЕ меняя исходные категориальные
     for col in cat_cols:
-        # Считаем частоты только на train (включая NaN как отдельную категорию)
+        # Считаем частоты на train (включая NaN как отдельную "категорию")
         value_counts = train_read[col].value_counts(dropna=False)
 
-        # count-encoding
-        count_series = df[col].map(value_counts).fillna(0).astype('float32')
-        df[f'{col}_count'] = count_series
+        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: обходим Categorical, работая через .astype(object) или .values
+        series = df[col]
+        if pd.api.types.is_categorical_dtype(series):
+            # Приводим к object, чтобы map не возвращал Categorical
+            series = series.astype(object)
 
-        # frequency-encoding
-        df[f'{col}_freq'] = (count_series / total_train).astype('float32')
+        mapped = series.map(value_counts)
+        count_encoded = mapped.fillna(0).astype('float32')
+        df[f'{col}_count'] = count_encoded
+        df[f'{col}_freq'] = (count_encoded / total_train).astype('float32')
 
     print(f"   Added count/freq for {len(cat_cols)} categorical features")
     return df
