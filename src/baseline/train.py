@@ -115,7 +115,7 @@ def train(do_tune=False):
             "random_seed": config.RANDOM_STATE,
             "verbose": 200,
             "thread_count": -1,
-            # "task_type": "GPU", "devices": "0"
+            "task_type": "GPU", "devices": "0"
         }
     else:
         # просто хорошие параметры, которые уже работали
