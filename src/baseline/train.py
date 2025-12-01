@@ -71,7 +71,7 @@ def objective(trial, X_tr, y_tr, X_val, y_val, cat_feats):
         "random_seed": config.RANDOM_STATE,
         "verbose": 0,
         "thread_count": -1,
-        # "task_type": "GPU", "devices": "0"
+        "task_type": "GPU", "devices": "0"
     }
 
     pool_tr = cb.Pool(X_tr, y_tr, cat_features=cat_feats)
