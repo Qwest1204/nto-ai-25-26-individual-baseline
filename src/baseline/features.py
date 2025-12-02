@@ -570,7 +570,7 @@ def add_nomic_features(
             # Пакетное кодирование (очень быстро на GPU)
             embeddings = model.encode(
                 texts_to_encode,
-                batch_size=16,                  # подберите под вашу видеокарту
+                batch_size=8,                  # подберите под вашу видеокарту
                 show_progress_bar=True,
                 normalize_embeddings=True,      # рекомендуется для Nomic
                 convert_to_numpy=True,
