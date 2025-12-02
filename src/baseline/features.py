@@ -228,6 +228,104 @@ def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFra
     return df.merge(user_to_read_count, on=constants.COL_USER_ID, how="left")
 
 
+def add_interaction_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет фичи взаимодействия пользователя и книги"""
+    print("Adding interaction features...")
+
+    # Фича: скорректированная популярность книги у похожих пользователей
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+
+    # 1. Склонность пользователя к популярным книгам
+    user_popularity_tendency = train_read.groupby(constants.COL_USER_ID).apply(
+        lambda x: x[constants.COL_AVG_RATING].corr(x[config.TARGET])
+        if len(x) > 1 else 0
+    ).reset_index(name='user_popularity_correlation')
+
+    # 2. Разброс оценок пользователя
+    user_rating_std = train_read.groupby(constants.COL_USER_ID)[config.TARGET].std().reset_index()
+    user_rating_std.columns = [constants.COL_USER_ID, 'user_rating_std']
+    user_rating_std['user_rating_std'] = user_rating_std['user_rating_std'].fillna(0)
+
+    # 3. Доля 5-звездочных оценок пользователя
+    user_high_rating_ratio = train_read.groupby(constants.COL_USER_ID).apply(
+        lambda x: (x[config.TARGET] >= 8).sum() / len(x) if len(x) > 0 else 0
+    ).reset_index(name='user_high_rating_ratio')
+
+    # 4. Аномальность оценки (отклонение от типичных оценок книги)
+    book_rating_quantiles = train_read.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(
+        ['mean', 'std', lambda x: x.quantile(0.25), lambda x: x.quantile(0.75)]
+    ).reset_index()
+    book_rating_quantiles.columns = [
+        constants.COL_BOOK_ID,
+        'book_rating_mean_detail',
+        'book_rating_std_detail',
+        'book_rating_q25',
+        'book_rating_q75'
+    ]
+
+    df = df.merge(user_popularity_tendency, on=constants.COL_USER_ID, how='left')
+    df = df.merge(user_rating_std, on=constants.COL_USER_ID, how='left')
+    df = df.merge(user_high_rating_ratio, on=constants.COL_USER_ID, how='left')
+    df = df.merge(book_rating_quantiles, on=constants.COL_BOOK_ID, how='left')
+
+    # Вычисляем аномальность
+    df['rating_anomaly'] = np.abs(df[config.TARGET] - df['book_rating_mean_detail']) / (
+            df['book_rating_std_detail'] + 1e-6)
+    df['is_outside_iqr'] = (
+            (df[config.TARGET] < df['book_rating_q25']) | (df[config.TARGET] > df['book_rating_q75'])).astype(int)
+
+    return df
+
+
+def add_content_similarity_features(df: pd.DataFrame, train_df: pd.DataFrame,
+                                    descriptions_df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет фичи схожести на основе контента"""
+    print("Adding content similarity features...")
+
+    # 1. Схожесть пользователя с книгой на основе истории
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1]
+
+    # Вычисляем средний BERT/Nomic эмбеддинг для каждого пользователя
+    if 'nomic_0' in df.columns:
+        # Используем существующие эмбеддинги
+        user_embeddings = train_read.merge(
+            df[[constants.COL_USER_ID, constants.COL_BOOK_ID] +
+               [col for col in df.columns if col.startswith('nomic_')]].drop_duplicates(),
+            on=[constants.COL_USER_ID, constants.COL_BOOK_ID],
+            how='left'
+        )
+
+        user_avg_embedding = user_embeddings.groupby(constants.COL_USER_ID)[
+            [col for col in df.columns if col.startswith('nomic_')]
+        ].mean().reset_index()
+
+        # Переименовываем колонки
+        user_avg_embedding.columns = [constants.COL_USER_ID] + [
+            f'user_avg_{col}' for col in user_avg_embedding.columns if col != constants.COL_USER_ID
+        ]
+
+        # Мержим и вычисляем косинусную схожесть
+        df = df.merge(user_avg_embedding, on=constants.COL_USER_ID, how='left')
+
+        # Вычисляем схожесть
+        nomic_cols = [col for col in df.columns if col.startswith('nomic_')]
+        user_avg_cols = [col for col in df.columns if col.startswith('user_avg_nomic_')]
+
+        if nomic_cols and user_avg_cols:
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            # Для каждой строки вычисляем схожесть
+            similarities = []
+            for idx, row in df.iterrows():
+                book_vec = row[nomic_cols].values.reshape(1, -1)
+                user_vec = row[user_avg_cols].values.reshape(1, -1)
+                sim = cosine_similarity(book_vec, user_vec)[0][0]
+                similarities.append(sim)
+
+            df['user_book_content_similarity'] = similarities
+
+    return df
+
 def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 50) -> pd.DataFrame:
     """Adds collaborative filtering embeddings using SVD.
 
@@ -626,6 +724,8 @@ def create_features(
     df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
     #df = add_text_features(df, train_df, descriptions_df)
+    df = add_interaction_features(df, train_df)
+    df = add_content_similarity_features(df, train_df, descriptions_df)
     df = add_nomic_features(df, train_df, descriptions_df)
     df = handle_missing_values(df, train_df)
 
