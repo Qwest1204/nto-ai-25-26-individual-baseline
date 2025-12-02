@@ -612,6 +612,7 @@ def create_features(
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
         include_aggregates (bool): If True, compute aggregate features. Defaults to False.
 
+
     Returns:
         pd.DataFrame: The final DataFrame with all features engineered.
     """
