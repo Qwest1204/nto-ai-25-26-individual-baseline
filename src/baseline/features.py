@@ -560,7 +560,7 @@ def add_nomic_features(
             # Кодирование БЕЗ неподдерживаемых аргументов
             embeddings_tensor = model.encode(
                 texts,
-                batch_size=32,
+                batch_size=8,
                 show_progress_bar=True,
                 convert_to_tensor=True,  # Возвращаем тензор для torch-операций
             )
