@@ -94,7 +94,7 @@ COL_PUBLISHER = "publisher"
 COL_AVG_RATING = "avg_rating"
 COL_GENRE_ID = "genre_id"
 COL_DESCRIPTION = "description"
-
+NOMIC_EMBEDDINGS_FILENAME = "nomic_embeddings_v1_5_st.joblib"
 
 # --- VALUES ---
 VAL_SOURCE_TRAIN = "train"
