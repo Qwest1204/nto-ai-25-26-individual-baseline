@@ -177,4 +177,4 @@ def train(tune_hyperparams: bool = False) -> None:
 
 if __name__ == "__main__":
     # Установите tune_hyperparams=True для запуска тюнинга
-    train(tune_hyperparams=False)
+    train(tune_hyperparams=True)
