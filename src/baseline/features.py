@@ -624,8 +624,8 @@ def create_features(
     df = add_to_read_features(df, train_df)
     df = add_cf_embeddings(df, train_df)
     df = add_genre_features(df, book_genres_df)
-    df = add_text_features(df, train_df, descriptions_df)
-    #df = add_nomic_features(df, train_df, descriptions_df)
+    #df = add_text_features(df, train_df, descriptions_df)
+    df = add_nomic_features(df, train_df, descriptions_df)
     df = handle_missing_values(df, train_df)
 
     # Convert categorical columns to pandas 'category' dtype for LightGBM
