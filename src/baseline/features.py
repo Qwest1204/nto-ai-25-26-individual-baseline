@@ -570,13 +570,14 @@ def add_nomic_features(
             # Пакетное кодирование (очень быстро на GPU)
             embeddings = model.encode(
                 texts_to_encode,
-                batch_size=8,                  # подберите под вашу видеокарту
-                show_progress_bar=True,
-                normalize_embeddings=True,      # рекомендуется для Nomic
+                batch_size=32,
+                normalize_embeddings=True,
                 convert_to_numpy=True,
-                output_value="token_embeddings",  # важно!
-                selected_layers=[-1],  # последний слой
-                truncation_dimension=256,
+                show_progress_bar=True,
+                **(
+                    {"output_value": "token_embeddings", "selected_layers": [-1], "truncation_dimension": 256}
+                    if True and 512 < 768 else {}
+                )
             )
             for book_id, emb in zip(book_ids_ordered, embeddings):
                 embeddings_dict[book_id] = emb.astype(np.float32)
@@ -593,7 +594,7 @@ def add_nomic_features(
     ]
     embeddings_array = np.stack(embeddings_list)
 
-    feature_names = [f"nomic_{i}" for i in range(768)]
+    feature_names = [f"nomic_{i}" for i in range(256)]
     nomic_df = pd.DataFrame(embeddings_array, columns=feature_names, index=df.index)
 
     df_with_features = pd.concat([df.reset_index(drop=True), nomic_df], axis=1)
