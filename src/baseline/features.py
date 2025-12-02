@@ -574,6 +574,9 @@ def add_nomic_features(
                 show_progress_bar=True,
                 normalize_embeddings=True,      # рекомендуется для Nomic
                 convert_to_numpy=True,
+                output_value="token_embeddings",  # важно!
+                selected_layers=[-1],  # последний слой
+                truncation_dimension=256,
             )
             for book_id, emb in zip(book_ids_ordered, embeddings):
                 embeddings_dict[book_id] = emb.astype(np.float32)
