@@ -1,129 +1,85 @@
 """
-Inference script to generate predictions for the test set.
-
-Computes aggregate features on all train data and applies them to test set,
-then generates predictions using the trained model.
+Inference script — полностью совместим с моделью, обученной на RMSEWithUncertainty.
 """
 
+import catboost as cb
+import joblib
 import numpy as np
 import pandas as pd
-import torch
+
 from . import config, constants
-from .features import handle_missing_values, add_target_encoding_and_interactions
-from .nn_model import *
+from .features import add_aggregate_features, handle_missing_values
+
 
 def predict() -> None:
-    """Generates and saves predictions for the test set.
-
-    This script loads prepared data from data/processed/, computes aggregate features
-    on all train data, applies them to test set, and generates predictions using
-    the trained model.
-
-    Note: Data must be prepared first using prepare_data.py, and model must be trained
-    using train.py
-    """
-    # Load prepared data
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
-
     if not processed_path.exists():
-        raise FileNotFoundError(
-            f"Processed data not found at {processed_path}. "
-            "Please run 'poetry run python -m src.baseline.prepare_data' first."
-        )
+        raise FileNotFoundError(f"Processed data not found at {processed_path}")
 
-    print(f"Loading prepared data from {processed_path}...")
+    print(f"Loading processed data from {processed_path}...")
     featured_df = pd.read_parquet(processed_path, engine="pyarrow")
     print(f"Loaded {len(featured_df):,} rows with {len(featured_df.columns)} features")
 
-    # Separate train and test sets
     train_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
-    test_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TEST].copy()
+    test_set  = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TEST].copy()
 
-    print(f"Train set: {len(train_set):,} rows")
-    print(f"Test set: {len(test_set):,} rows")
+    print(f"Train: {len(train_set):,} | Test: {len(test_set):,}")
 
-    # Compute advanced features on all train data (to use for test predictions)
-    print("\nComputing advanced features on all train data...")
-    test_set_final = add_target_encoding_and_interactions(test_set.copy(), train_set)
+    # Aggregate features (leak-free)
+    print("\nAdding aggregate features to test...")
+    test_set = add_aggregate_features(test_set, train_set)
 
-    # Handle missing values (use train_set for fill values)
+    # Удаляем временные колонки, если остались
+    test_set = test_set.drop(columns=["time_decay"], errors="ignore")
+
+    # Missing values
     print("Handling missing values...")
-    test_set_final = handle_missing_values(test_set_final, train_set)
+    test_set = handle_missing_values(test_set, train_set)
 
-    # Define features (exclude source, target, prediction, timestamp columns)
-    exclude_cols = [
-        constants.COL_SOURCE,
-        config.TARGET,
-        constants.COL_PREDICTION,
-        constants.COL_TIMESTAMP,
-    ]
-    features = [col for col in test_set_final.columns if col not in exclude_cols]
+    # Загружаем список фичей, использованных при обучении
+    features_path = config.MODEL_DIR / "feature_columns.pkl"
+    if features_path.exists():
+        features = joblib.load(features_path)
+        print(f"Loaded {len(features)} features loaded from training")
+    else:
+        # fallback — все кроме служебных
+        exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+        features = [c for c in test_set.columns if c not in exclude and test_set[c].dtype.name != "object"]
+        print(f"Warning: feature list not found — using auto-detected {len(features)} features")
 
-    # Exclude any remaining object columns that are not model features
-    non_feature_object_cols = test_set_final[features].select_dtypes(include=["object"]).columns.tolist()
-    features = [f for f in features if f not in non_feature_object_cols]
+    X_test = test_set[features]
 
-    X_test = test_set_final[features]
-    print(f"Prediction features: {len(features)}")
-
-    # Load trained model
+    # Загрузка модели
     model_path = config.MODEL_DIR / "catboost_model.cbm"
     if not model_path.exists():
-        raise FileNotFoundError(
-            f"Model not found at {model_path}. " "Please run 'poetry run python -m src.baseline.train' first."
-        )
+        raise FileNotFoundError(f"Model not found: {model_path}")
 
-    print(f"\nLoading model from {model_path}...")
-    from catboost import CatBoostRegressor, Pool
-    model = CatBoostRegressor()
+    print(f"Loading model from {model_path}...")
+    model = cb.CatBoostRegressor()
     model.load_model(str(model_path))
 
-    cat_features = [col for col in config.CAT_FEATURES if col in features]
-    for col in cat_features:
-        X_test[col] = X_test[col].astype(str)
+    # КЛЮЧЕВОЕ: берём только первый столбец (среднее значение)
+    print("Predicting (taking mean from RMSEWithUncertainty)...")
+    raw_preds = model.predict(X_test)          # может быть (n, 2) или (n,)
 
-    test_pool = Pool(X_test, cat_features=cat_features)
-    test_preds = model.predict(test_pool)
-    ft_path = config.MODEL_DIR / 'ft_transformer.pt'
-    if ft_path.exists():
-        print("Loading FT-Transformer for ensemble...")
-        ft_state = torch.load(ft_path, weights_only=False)
-        cat_feats = [col for col in config.CAT_FEATURES if col in X_test.columns]
-        num_feats = [col for col in X_test.columns if col not in cat_feats]
+    if raw_preds.ndim == 2 and raw_preds.shape[1] == 2:
+        test_preds = raw_preds[:, 0]           # ← берём только mean
+        print(f"Detected RMSEWithUncertainty output → extracted mean (variance discarded)")
+    else:
+        test_preds = raw_preds.ravel()
 
-        X_test_num, X_test_cat, _, _, _ = prepare_data_for_nn(test_set_final, cat_feats, num_feats, fit=False,
-                                                              encoders=ft_state['encoders'], scaler=ft_state['scaler'])
-
-        test_ds = RatingDataset(X_test_num, X_test_cat)
-        test_loader = DataLoader(test_ds, batch_size=2048, shuffle=False)
-
-        ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats])
-        ft_model.load_state_dict(ft_state['model'])
-        ft_model.eval()
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        ft_model.to(device)
-
-        ft_preds = []
-        with torch.no_grad():
-            for batch in test_loader:
-                x_num, x_cat = [b.to(device) for b in batch]
-                ft_preds.append(ft_model(x_num, x_cat).cpu().numpy())
-        ft_preds = np.concatenate(ft_preds)
-
-        test_preds = 0.6 * test_preds + 0.4 * ft_preds  # Ансамбль!
-    # Clip predictions to be within the valid rating range [0, 10]
+    # Клиппинг в [0, 10]
     clipped_preds = np.clip(test_preds, constants.PREDICTION_MIN_VALUE, constants.PREDICTION_MAX_VALUE)
 
-    # Create submission file
+    # Submission
     submission_df = test_set[[constants.COL_USER_ID, constants.COL_BOOK_ID]].copy()
     submission_df[constants.COL_PREDICTION] = clipped_preds
 
-    # Ensure submission directory exists
     config.SUBMISSION_DIR.mkdir(parents=True, exist_ok=True)
     submission_path = config.SUBMISSION_DIR / constants.SUBMISSION_FILENAME
-
     submission_df.to_csv(submission_path, index=False)
-    print(f"\nSubmission file created at: {submission_path}")
+
+    print(f"\nSubmission saved → {submission_path}")
     print(f"Predictions: min={clipped_preds.min():.4f}, max={clipped_preds.max():.4f}, mean={clipped_preds.mean():.4f}")
 
 

@@ -1,5 +1,3 @@
-# features.py (fixed)
-
 """
 Feature engineering script.
 """
@@ -10,105 +8,280 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import MultiLabelBinarizer
+from scipy.sparse import csr_matrix
 from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 from sentence_transformers import SentenceTransformer
-from scipy.spatial.distance import cdist
 
 from . import config, constants
 
 
-def _load_nomic_model():
-    """Load Nomic model once with optimized settings."""
-    model = SentenceTransformer(
-        config.NOMIC_MODEL_NAME,
-        trust_remote_code=True,
-        device=config.NOMIC_DEVICE
-    )
-    # Disable truncation warnings
-    model.max_seq_length = config.NOMIC_MAX_LENGTH
-    return model
-
-
 def add_aggregate_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates and adds user, book, and author aggregate features.
-
-    Uses the training data to compute mean ratings and interaction counts
-    to prevent data leakage from the test set.
-
-    Args:
-        df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion of the data for calculations.
-
-    Returns:
-        pd.DataFrame: The DataFrame with new aggregate features.
     """
-    print("Adding aggregate features...")
+    Безопасные агрегатные фичи без leakage.
+    Использует только существующие константы.
+    """
+    print("Adding safe aggregate features...")
 
-    # User-based aggregates
-    user_agg = train_df.groupby(constants.COL_USER_ID)[config.TARGET].agg(["mean", "count", "std"]).reset_index()
+    # Используем только прочитанные книги для вычисления агрегатов
+    train_read = train_df[train_df[constants.COL_HAS_READ] == 1].copy()
+
+    # Глобальные статистики
+    global_mean = train_read[config.TARGET].mean()
+    global_std = train_read[config.TARGET].std()
+
+    # 1. User aggregates (только базовые, безопасные)
+    user_agg = train_read.groupby(constants.COL_USER_ID)[config.TARGET].agg(['mean', 'count']).reset_index()
     user_agg.columns = [
         constants.COL_USER_ID,
         constants.F_USER_MEAN_RATING,
-        constants.F_USER_RATINGS_COUNT,
-        'user_rating_std'
+        constants.F_USER_RATINGS_COUNT
     ]
 
-    # Book-based aggregates
-    book_agg = train_df.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(["mean", "count", "std"]).reset_index()
+    # 2. Book aggregates (только базовые, безопасные)
+    book_agg = train_read.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(['mean', 'count']).reset_index()
     book_agg.columns = [
         constants.COL_BOOK_ID,
         constants.F_BOOK_MEAN_RATING,
-        constants.F_BOOK_RATINGS_COUNT,
-        'book_rating_std'
+        constants.F_BOOK_RATINGS_COUNT
     ]
 
-    # Author-based aggregates
-    author_agg = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(["mean", "std"]).reset_index()
-    author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING, 'author_rating_std']
+    # 3. Author aggregates (если можем загрузить books.csv)
+    author_agg = None
+    books_df = None
 
-    # Merge aggregates into the main dataframe
-    df = df.merge(user_agg, on=constants.COL_USER_ID, how="left")
-    df = df.merge(book_agg, on=constants.COL_BOOK_ID, how="left")
-    df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how="left")
+    # Пробуем несколько возможных путей
+    possible_paths = [
+        config.DATA_DIR / "raw" / constants.BOOK_DATA_FILENAME,  # data/raw/books.csv
+        config.DATA_DIR / constants.BOOK_DATA_FILENAME,  # data/books.csv
+        #Path("D:\\br\\data\\raw\\books.csv"),  # Абсолютный путь
+        #Path("data/raw/books.csv"),  # Относительный путь
+    ]
 
-    # New: Interactions with std
-    df['user_book_std_diff'] = df['user_rating_std'] - df['book_rating_std']
+    books_path = None
+    for path in possible_paths:
+        if path.exists():
+            books_path = path
+            break
+
+    if books_path:
+        try:
+            books_df = pd.read_csv(books_path)
+            print(f"Loaded books data from {books_path}")
+
+            if constants.COL_AUTHOR_ID in books_df.columns:
+                # Мержим author_id к train_read
+                train_with_author = train_read.merge(
+                    books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
+                    on=constants.COL_BOOK_ID,
+                    how='left'
+                )
+
+                # Убираем книги без автора
+                train_with_author = train_with_author.dropna(subset=[constants.COL_AUTHOR_ID])
+
+                if not train_with_author.empty:
+                    author_agg = train_with_author.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(
+                        ['mean']).reset_index()
+                    author_agg.columns = [constants.COL_AUTHOR_ID, constants.F_AUTHOR_MEAN_RATING]
+                    print(f"Computed aggregates for {len(author_agg)} authors")
+        except Exception as e:
+            print(f"Error loading books data: {e}")
+    else:
+        print(f"Books file not found. Tried paths: {possible_paths}")
+        print(f"Current DATA_DIR: {config.DATA_DIR}")
+        print(f"DATA_DIR exists: {config.DATA_DIR.exists()}")
+
+    # 4. Мержим все агрегаты
+    print("Merging aggregates...")
+
+    # User aggregates
+    df = df.merge(user_agg, on=constants.COL_USER_ID, how='left')
+    print(f"  Merged user aggregates: {len(user_agg)} users")
+
+    # Book aggregates
+    df = df.merge(book_agg, on=constants.COL_BOOK_ID, how='left')
+    print(f"  Merged book aggregates: {len(book_agg)} books")
+
+    # Author aggregates (если есть)
+    if author_agg is not None and not author_agg.empty:
+        # Сначала мержим author_id к df из books_df
+        if constants.COL_AUTHOR_ID not in df.columns and books_df is not None:
+            df = df.merge(
+                books_df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]],
+                on=constants.COL_BOOK_ID,
+                how='left'
+            )
+
+        if constants.COL_AUTHOR_ID in df.columns:
+            df = df.merge(author_agg, on=constants.COL_AUTHOR_ID, how='left')
+            print(f"  Merged author aggregates: {len(author_agg)} authors")
+
+    # 5. Заполняем пропуски стратегически
+    print("Handling NaN values...")
+
+    # Для пользователей без истории
+    user_na_mask = df[constants.F_USER_MEAN_RATING].isna()
+    if user_na_mask.any():
+        df.loc[user_na_mask, constants.F_USER_MEAN_RATING] = global_mean
+        df.loc[user_na_mask, constants.F_USER_RATINGS_COUNT] = 0
+        print(f"  Filled {user_na_mask.sum()} missing user aggregates")
+
+    # Для книг без истории
+    book_na_mask = df[constants.F_BOOK_MEAN_RATING].isna()
+    if book_na_mask.any():
+        df.loc[book_na_mask, constants.F_BOOK_MEAN_RATING] = global_mean * 1.05  # benefit of doubt
+        df.loc[book_na_mask, constants.F_BOOK_RATINGS_COUNT] = 0
+        print(f"  Filled {book_na_mask.sum()} missing book aggregates")
+
+    # Для авторов без истории
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        author_na_mask = df[constants.F_AUTHOR_MEAN_RATING].isna()
+        if author_na_mask.any():
+            df.loc[author_na_mask, constants.F_AUTHOR_MEAN_RATING] = global_mean
+            print(f"  Filled {author_na_mask.sum()} missing author aggregates")
+
+    # 6. Добавляем простые комбинации (безопасные)
+    print("Creating interaction features...")
+
+    # Разница между средним пользователя и книги
+    df['user_book_rating_diff'] = df[constants.F_USER_MEAN_RATING] - df[constants.F_BOOK_MEAN_RATING]
+
+    # Абсолютная разница
+    df['user_book_rating_abs_diff'] = df['user_book_rating_diff'].abs()
+
+    # Совместимость (чем меньше разница, тем выше совместимость)
+    df['user_book_compatibility'] = 10 - df['user_book_rating_abs_diff']
+
+    # Произведение популярности (log scale для уменьшения skew)
+    df['user_popularity_log'] = np.log1p(df[constants.F_USER_RATINGS_COUNT])
+    df['book_popularity_log'] = np.log1p(df[constants.F_BOOK_RATINGS_COUNT])
+    df['user_book_popularity_product'] = df['user_popularity_log'] * df['book_popularity_log']
+
+    # Reliability пользователя (чем больше оценок, тем надежнее)
+    df['user_reliability'] = 1 - np.exp(-df[constants.F_USER_RATINGS_COUNT] / 5)
+
+    # Reliability книги
+    df['book_reliability'] = 1 - np.exp(-df[constants.F_BOOK_RATINGS_COUNT] / 10)
+
+    # Combined reliability
+    df['combined_reliability'] = df['user_reliability'] * 0.6 + df['book_reliability'] * 0.4
+
+    # Ожидаемый рейтинг (взвешенная комбинация)
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        df['expected_rating'] = (
+            df[constants.F_USER_MEAN_RATING] * 0.4 +
+            df[constants.F_BOOK_MEAN_RATING] * 0.4 +
+            df[constants.F_AUTHOR_MEAN_RATING] * 0.2
+        )
+    else:
+        df['expected_rating'] = (
+            df[constants.F_USER_MEAN_RATING] * 0.5 +
+            df[constants.F_BOOK_MEAN_RATING] * 0.5
+        )
+
+    # Ограничиваем ожидаемый рейтинг диапазоном 0-10
+    df['expected_rating'] = df['expected_rating'].clip(0, 10)
+
+    # 7. Статистика по добавленным фичам
+    feature_cols = [
+        constants.F_USER_MEAN_RATING, constants.F_USER_RATINGS_COUNT,
+        constants.F_BOOK_MEAN_RATING, constants.F_BOOK_RATINGS_COUNT,
+        'user_book_rating_diff', 'user_book_rating_abs_diff',
+        'user_book_compatibility', 'user_book_popularity_product',
+        'user_reliability', 'book_reliability', 'combined_reliability',
+        'expected_rating'
+    ]
+
+    # Добавляем author фичу, если есть
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        feature_cols.append(constants.F_AUTHOR_MEAN_RATING)
+
+    num_features = len([c for c in feature_cols if c in df.columns])
+
+    print(f"✅ Added {num_features} safe aggregate features")
+    print(f"   Global mean: {global_mean:.3f}")
+    print(f"   Global std: {global_std:.3f}")
+    print(f"   User coverage: {(~user_na_mask).mean():.2%}")
+    print(f"   Book coverage: {(~book_na_mask).mean():.2%}")
+
     return df
 
 
-def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates and adds the count of genres for each book.
+def add_to_read_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
+    """Adds features based on has_read=0 (to-read list).
+
+    Args:
+        df (pd.DataFrame): The main DataFrame to add features to.
+        train_df (pd.DataFrame): The training portion for calculations.
+
+    Returns:
+        pd.DataFrame: The DataFrame with to-read features.
+    """
+    print("Adding to-read features...")
+    to_read_df = train_df[train_df[constants.COL_HAS_READ] == 0]
+    user_to_read_count = to_read_df.groupby(constants.COL_USER_ID).size().reset_index(name='user_to_read_count')
+    return df.merge(user_to_read_count, on=constants.COL_USER_ID, how="left")
+
+
+def add_cf_embeddings(df: pd.DataFrame, train_df: pd.DataFrame, n_components: int = 50) -> pd.DataFrame:
+    """Adds collaborative filtering embeddings using SVD.
+
+    Args:
+        df (pd.DataFrame): The main DataFrame to add features to.
+        train_df (pd.DataFrame): The training portion for fitting SVD.
+        n_components (int): Number of SVD components.
+
+    Returns:
+        pd.DataFrame: The DataFrame with SVD embeddings.
+    """
+    print("Adding CF embeddings...")
+    # Filter to has_read=1 for matrix
+    ratings_df = train_df[train_df[constants.COL_HAS_READ] == 1]
+    pivot = ratings_df.pivot_table(index=constants.COL_USER_ID, columns=constants.COL_BOOK_ID, values=config.TARGET, fill_value=0)
+    sparse_matrix = csr_matrix(pivot.values)
+    svd = TruncatedSVD(n_components=n_components)
+    user_embeddings = svd.fit_transform(sparse_matrix)
+    book_embeddings = svd.components_.T
+
+    user_emb_df = pd.DataFrame(user_embeddings, index=pivot.index, columns=[f'user_svd_{i}' for i in range(n_components)])
+    book_emb_df = pd.DataFrame(book_embeddings, index=pivot.columns, columns=[f'book_svd_{i}' for i in range(n_components)])
+
+    df = df.merge(user_emb_df, on=constants.COL_USER_ID, how="left")
+    df = df.merge(book_emb_df, on=constants.COL_BOOK_ID, how="left")
+    return df
+
+
+def add_genre_features(df: pd.DataFrame, book_genres_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates and adds genre features, including one-hot for top genres.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
         book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
-        train_df (pd.DataFrame): The training portion for genre mean calculations.
 
     Returns:
-        pd.DataFrame: The DataFrame with the new 'book_genres_count' column.
+        pd.DataFrame: The DataFrame with genre features.
     """
     print("Adding genre features...")
     genre_counts = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].count().reset_index()
-    genre_counts.columns = [
-        constants.COL_BOOK_ID,
-        constants.F_BOOK_GENRES_COUNT,
-    ]
+    genre_counts.columns = [constants.COL_BOOK_ID, constants.F_BOOK_GENRES_COUNT]
 
-    # New: Genre mean ratings (target encoding for genres)
-    train_genres = book_genres_df.merge(train_df[[constants.COL_BOOK_ID, config.TARGET]], on=constants.COL_BOOK_ID,
-                                        how='inner')
-    genre_mean = train_genres.groupby(constants.COL_GENRE_ID)[config.TARGET].mean().reset_index()
-    genre_mean.columns = [constants.COL_GENRE_ID, 'genre_mean_rating']
-
-    # Agg genre means per book (mean of genre means)
-    book_genre_means = book_genres_df.merge(genre_mean, on=constants.COL_GENRE_ID).groupby(constants.COL_BOOK_ID)[
-        'genre_mean_rating'].mean().reset_index()
-    book_genre_means.columns = [constants.COL_BOOK_ID, 'book_genre_mean_rating']
+    # One-hot for genres
+    book_genres_grouped = book_genres_df.groupby(constants.COL_BOOK_ID)[constants.COL_GENRE_ID].apply(list).reset_index()
+    mlb = MultiLabelBinarizer(sparse_output=True)
+    genre_onehot = pd.DataFrame.sparse.from_spmatrix(
+        mlb.fit_transform(book_genres_grouped[constants.COL_GENRE_ID]),
+        index=book_genres_grouped.index,
+        columns=[f"genre_{c}" for c in mlb.classes_]
+    )
+    genre_onehot = genre_onehot.sparse.to_dense()
+    genre_onehot[constants.COL_BOOK_ID] = book_genres_grouped[constants.COL_BOOK_ID]
 
     df = df.merge(genre_counts, on=constants.COL_BOOK_ID, how="left")
-    df = df.merge(book_genre_means, on=constants.COL_BOOK_ID, how="left")
+    df = df.merge(genre_onehot, on=constants.COL_BOOK_ID, how="left")
     return df
 
 
@@ -157,307 +330,291 @@ def add_text_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df:
         joblib.dump(vectorizer, vectorizer_path)
         print(f"Vectorizer saved to {vectorizer_path}")
 
-    # Apply vectorizer to all descriptions
-    all_descriptions = descriptions_df.copy()
+    # Transform all book descriptions
+    all_descriptions = descriptions_df[[constants.COL_BOOK_ID, constants.COL_DESCRIPTION]].copy()
     all_descriptions[constants.COL_DESCRIPTION] = all_descriptions[constants.COL_DESCRIPTION].fillna("")
-    tfidf_matrix = vectorizer.transform(all_descriptions[constants.COL_DESCRIPTION])
 
-    # Create DataFrame with TF-IDF features
-    tfidf_df = pd.DataFrame(
-        tfidf_matrix.toarray(),
-        columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])],
+    # Get descriptions in the same order as df[book_id]
+    description_map = dict(
+        zip(all_descriptions[constants.COL_BOOK_ID], all_descriptions[constants.COL_DESCRIPTION], strict=False)
     )
-    tfidf_df[constants.COL_BOOK_ID] = all_descriptions[constants.COL_BOOK_ID].values
+    df_descriptions = df[constants.COL_BOOK_ID].map(description_map).fillna("")
 
-    # Merge TF-IDF features into main DataFrame
-    df = df.merge(tfidf_df, on=constants.COL_BOOK_ID, how="left")
+    # Transform to TF-IDF features
+    tfidf_matrix = vectorizer.transform(df_descriptions)
+    tfidf_df = pd.DataFrame.sparse.from_spmatrix(
+        tfidf_matrix, index=df.index, columns=[f"tfidf_{i}" for i in range(tfidf_matrix.shape[1])]
+    )
+    tfidf_df = tfidf_df.sparse.to_dense()
+    df = pd.concat([df.reset_index(drop=True), tfidf_df.reset_index(drop=True)], axis=1)
+
     print(f"Added {tfidf_matrix.shape[1]} TF-IDF features.")
     return df
 
 
-def add_book_and_author_embeddings(df: pd.DataFrame, train_df: pd.DataFrame,
-                                   descriptions_df: pd.DataFrame) -> pd.DataFrame:
-    """Adds Nomic embeddings for books and authors.
+def add_bert_features(df: pd.DataFrame, train_df: pd.DataFrame, descriptions_df: pd.DataFrame) -> pd.DataFrame:
+    """Adds BERT embeddings from book descriptions.
 
-    Fits embeddings on training data only, reduces dimensionality with PCA.
-    Averages author embeddings across their books.
+    Computes BERT embeddings only for books in the training data to avoid
+    data leakage, then applies to all. Saves embeddings for reuse.
 
     Args:
         df (pd.DataFrame): The main DataFrame to add features to.
-        train_df (pd.DataFrame): The training portion for fitting embeddings.
+        train_df (pd.DataFrame): The training portion for computing embeddings.
         descriptions_df (pd.DataFrame): DataFrame with book descriptions.
 
     Returns:
-        pd.DataFrame: The DataFrame with embedding features added.
+        pd.DataFrame: The DataFrame with BERT features added.
     """
-    print("Adding Nomic embeddings (book + author)...")
-    TARGET_EMBED_DIM = 384  # Increased from 300
+    print("Adding BERT features...")
 
+    # Ensure model directory exists
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    book_emb_path = config.MODEL_DIR / "nomic_book_embeddings_384.pkl"
-    author_emb_path = config.MODEL_DIR / "nomic_author_embeddings_384.pkl"
+    embeddings_path = config.MODEL_DIR / constants.BERT_EMBEDDINGS_FILENAME
 
-    # Load or compute book embeddings
-    if book_emb_path.exists():
-        print(f"Loading existing book embeddings from {book_emb_path}")
-        book_embeddings_dict = joblib.load(book_emb_path)
-    else:
-        model = _load_nomic_model()
+    tokenizer = AutoTokenizer.from_pretrained(config.BERT_MODEL_NAME)
+    model = AutoModel.from_pretrained(config.BERT_MODEL_NAME)
+    model.eval()
+    model.to(config.BERT_DEVICE)
 
-        # Get unique books from train (for fit PCA)
-        train_books = train_df[constants.COL_BOOK_ID].unique()
-        train_desc = descriptions_df[descriptions_df[constants.COL_BOOK_ID].isin(train_books)].copy()
-        train_desc[constants.COL_DESCRIPTION] = train_desc[constants.COL_DESCRIPTION].fillna(
-            "No description available.")
-
-        # Compute embeddings in batches
-        print("Computing book embeddings on train...")
-        train_embs = []
-        for i in tqdm(range(0, len(train_desc), config.NOMIC_BATCH_SIZE)):
-            batch = train_desc[constants.COL_DESCRIPTION].iloc[i:i + config.NOMIC_BATCH_SIZE].tolist()
-            train_embs.extend(model.encode(batch, show_progress_bar=False))
-
-        train_embs = np.array(train_embs)
-
-        # Fit PCA on train embeddings
-        pca = PCA(n_components=TARGET_EMBED_DIM)
-        pca.fit(train_embs)
-
-        # Now compute for all books
-        all_desc = descriptions_df.copy()
-        all_desc[constants.COL_DESCRIPTION] = all_desc[constants.COL_DESCRIPTION].fillna("No description available.")
-
-        print("Computing book embeddings on all...")
-        all_embs = []
-        for i in tqdm(range(0, len(all_desc), config.NOMIC_BATCH_SIZE)):
-            batch = all_desc[constants.COL_DESCRIPTION].iloc[i:i + config.NOMIC_BATCH_SIZE].tolist()
-            all_embs.extend(model.encode(batch, show_progress_bar=False))
-
-        all_embs = np.array(all_embs)
-
-        # Apply PCA
-        reduced_embs = pca.transform(all_embs)
-
-        book_embeddings_dict = dict(zip(all_desc[constants.COL_BOOK_ID], reduced_embs))
-        joblib.dump(book_embeddings_dict, book_emb_path)
-        print(f"Book embeddings (384-dim) saved to {book_emb_path}")
-
-    # Author embeddings: average book embeddings per author
-    if author_emb_path.exists():
-        print(f"Loading existing author embeddings from {author_emb_path}")
-        author_embeddings_dict = joblib.load(author_emb_path)
-    else:
-        # Merge author_id to descriptions
-        author_desc = descriptions_df.merge(df[[constants.COL_BOOK_ID, constants.COL_AUTHOR_ID]].drop_duplicates(),
-                                            on=constants.COL_BOOK_ID)
-
-        unique_authors = author_desc[constants.COL_AUTHOR_ID].unique()
-        author_emb_list = []
-        author_ids = []
-
-        print("Computing author embeddings (avg book emb)...")
-        for author_id in tqdm(unique_authors):
-            author_books = author_desc[author_desc[constants.COL_AUTHOR_ID] == author_id][constants.COL_BOOK_ID]
-            author_embs = np.array([book_embeddings_dict.get(bid, np.zeros(TARGET_EMBED_DIM)) for bid in author_books])
-            if len(author_embs) > 0:
-                avg_emb = np.mean(author_embs, axis=0)
-            else:
-                avg_emb = np.zeros(TARGET_EMBED_DIM)
-            author_emb_list.append(avg_emb)
-            author_ids.append(author_id)
-
-        author_embeddings_dict = dict(zip(author_ids, author_emb_list))
-        joblib.dump(author_embeddings_dict, author_emb_path)
-        print(f"Author embeddings (384-dim) saved to {author_emb_path}")
-
-    # Map to df
-    # Book embeddings
-    book_emb_matrix = np.array([
-        book_embeddings_dict.get(bid, np.zeros(TARGET_EMBED_DIM))
-        for bid in df[constants.COL_BOOK_ID]
-    ])
-    book_cols = [f"nomic_book_{i}" for i in range(TARGET_EMBED_DIM)]
-    book_df = pd.DataFrame(book_emb_matrix, columns=book_cols, index=df.index)
-
-    # Author embeddings
-    author_emb_matrix = np.array([
-        author_embeddings_dict.get(aid, np.zeros(TARGET_EMBED_DIM))
-        for aid in df[constants.COL_AUTHOR_ID]
-    ])
-    author_cols = [f"nomic_author_{i}" for i in range(TARGET_EMBED_DIM)]
-    author_df = pd.DataFrame(author_emb_matrix, columns=author_cols, index=df.index)
-
-    # Concat
-    df = pd.concat([df.reset_index(drop=True), book_df, author_df], axis=1)
-    print(f"Added {len(book_cols) + len(author_cols)} Nomic features (book + author, 384-dim).")
-    return df
-
-
-def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Extract temporal features from timestamp."""
-    if constants.COL_TIMESTAMP in df.columns:
-        df['day_of_week'] = df[constants.COL_TIMESTAMP].dt.dayofweek
-        df['month'] = df[constants.COL_TIMESTAMP].dt.month
-        df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
-
-        df['day_of_week'] = df['day_of_week'].astype('category')
-        df['month'] = df['month'].astype('category')
-
-        # Recency: days since user's first rating (approx)
-        df['user_first_ts'] = df.groupby(constants.COL_USER_ID)[constants.COL_TIMESTAMP].transform('min')
-        df['days_since_first'] = (df[constants.COL_TIMESTAMP] - df['user_first_ts']).dt.days.fillna(0)
-        df.drop('user_first_ts', axis=1, inplace=True)  # Clean up
-    return df
-
-
-def add_similarity_features(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Cosine similarity between user pref embeddings and book/author embeddings."""
-    # User prefs: mean book embedding per user from train
-    book_emb_cols = [f"nomic_book_{i}" for i in range(384)]
-    user_book_emb = train_df.merge(df[[constants.COL_BOOK_ID] + book_emb_cols], on=constants.COL_BOOK_ID, how='left')
-    user_pref_emb = user_book_emb.groupby(constants.COL_USER_ID)[book_emb_cols].mean().reset_index()
-
-    # Merge to df
-    df = df.merge(user_pref_emb, on=constants.COL_USER_ID, how='left', suffixes=('', '_user_pref'))
-
-    # Cosine sim for book
-    user_pref_matrix = df[[c + '_user_pref' for c in book_emb_cols]].fillna(0).values
-    book_matrix = df[book_emb_cols].fillna(0).values
-    sim_book = 1 - cdist(user_pref_matrix, book_matrix, metric='cosine').diagonal()
-    df['user_book_emb_sim'] = np.nan_to_num(sim_book, nan=0.0)
-
-    # Clean up
-    df.drop(columns=[c + '_user_pref' for c in book_emb_cols], inplace=True)
-    return df
-
-
-def add_target_encoding_and_interactions(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    print("Adding Target Encoding + Interactions + Rank features...")
-
-    global_mean = train_df[config.TARGET].mean()
-
-    # Smoothed Target Encoding
-    # User
-    user_stats = train_df.groupby(constants.COL_USER_ID)[config.TARGET].agg(['mean', 'count'])
-    user_stats['user_te'] = (user_stats['mean'] * user_stats['count'] + global_mean * 20) / (user_stats['count'] + 20)
-    user_stats['user_ratings_count'] = user_stats['count']
-
-    # Book
-    book_stats = train_df.groupby(constants.COL_BOOK_ID)[config.TARGET].agg(['mean', 'count'])
-    book_stats['book_te'] = (book_stats['mean'] * book_stats['count'] + global_mean * 10) / (book_stats['count'] + 10)
-    book_stats['book_ratings_count'] = book_stats['count']
-
-    # Author
-    author_stats = train_df.groupby(constants.COL_AUTHOR_ID)[config.TARGET].agg(['mean', 'count'])
-    author_stats['author_te'] = (author_stats['mean'] * author_stats['count'] + global_mean * 5) / (
-            author_stats['count'] + 5)
-
-    # Merge
-    df = df.merge(user_stats[['user_te', 'user_ratings_count']], on=constants.COL_USER_ID, how='left')
-    df = df.merge(book_stats[['book_te', 'book_ratings_count']], on=constants.COL_BOOK_ID, how='left')
-    df = df.merge(author_stats[['author_te']], on=constants.COL_AUTHOR_ID, how='left')
-
-    # Fill missing
-    df['user_te'] = df['user_te'].fillna(global_mean)
-    df['book_te'] = df['book_te'].fillna(global_mean)
-    df['author_te'] = df['author_te'].fillna(global_mean)
-    df['user_ratings_count'] = df['user_ratings_count'].fillna(0)
-    df['book_ratings_count'] = df['book_ratings_count'].fillna(0)
-
-    # Interaction Features
-    df['user_book_te_mult'] = df['user_te'] * df['book_te']
-    df['user_book_te_diff'] = df['user_te'] - df['book_te']
-    df['user_book_count_ratio'] = (df['user_ratings_count'] + 1) / (df['book_ratings_count'] + 1)
-    df['user_author_te'] = df['user_te'] * df['author_te']
-
-    # Rank Features
-    train_sorted = train_df.sort_values(constants.COL_TIMESTAMP)
-    train_sorted['user_rating_order'] = train_sorted.groupby(constants.COL_USER_ID).cumcount() + 1
-    train_sorted['user_total_ratings'] = train_sorted.groupby(constants.COL_USER_ID)[config.TARGET].transform('count')
-    train_sorted['user_rating_pct'] = train_sorted['user_rating_order'] / train_sorted['user_total_ratings']
-
-    # Merge rank features
-    rank_cols = ['user_rating_pct']
-    df = df.merge(
-        train_sorted[[constants.COL_USER_ID, constants.COL_BOOK_ID] + rank_cols],
-        on=[constants.COL_USER_ID, constants.COL_BOOK_ID],
-        how='left'
+    # Get unique books
+    all_books = df[constants.COL_BOOK_ID].unique()
+    desc_map = dict(
+        zip(descriptions_df[constants.COL_BOOK_ID], descriptions_df[constants.COL_DESCRIPTION], strict=False)
     )
-    df['user_rating_pct'] = df['user_rating_pct'].fillna(0.5)  # среднее положение
 
-    # New additions
-    df = add_temporal_features(df)
-    df = add_similarity_features(df, train_df)
+    if embeddings_path.exists():
+        print(f"Loading existing BERT embeddings from {embeddings_path}")
+        embeddings_dict = joblib.load(embeddings_path)
+    else:
+        print("Computing BERT embeddings...")
+        embeddings_dict = {}
+        for book_id in tqdm(all_books):
+            desc = desc_map.get(book_id, "")
+            if not desc:
+                continue
+            inputs = tokenizer(desc, return_tensors="pt", max_length=config.BERT_MAX_LENGTH, truncation=True, padding=True)
+            inputs = {k: v.to(config.BERT_DEVICE) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs)
+            embedding = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+            embeddings_dict[book_id] = embedding
+        joblib.dump(embeddings_dict, embeddings_path)
+        print(f"Embeddings saved to {embeddings_path}")
 
-    # New: User age - publication year diff
-    df['user_book_age_diff'] = df[constants.COL_AGE] - df[constants.COL_PUBLICATION_YEAR]
+    # Map embeddings to df
+    df_book_ids = df[constants.COL_BOOK_ID]
+    embeddings_list = [embeddings_dict.get(book_id, np.zeros(config.BERT_EMBEDDING_DIM)) for book_id in df_book_ids]
+    embeddings_array = np.array(embeddings_list)
 
-    # New: Gender-book interaction (mean rating per gender)
-    gender_mean = train_df.groupby(constants.COL_GENDER)[config.TARGET].mean()
-    df['gender_mean_rating'] = df[constants.COL_GENDER].map(gender_mean).fillna(global_mean)
+    bert_feature_names = [f"bert_{i}" for i in range(config.BERT_EMBEDDING_DIM)]
+    bert_df = pd.DataFrame(embeddings_array, columns=bert_feature_names, index=df.index)
 
-    print("Target Encoding + Interactions + Rank + New features added!")
-    return df
+    df_with_bert = pd.concat([df.reset_index(drop=True), bert_df.reset_index(drop=True)], axis=1)
+    print(f"Added {len(bert_feature_names)} BERT features.")
+    return df_with_bert
 
 
 def handle_missing_values(df: pd.DataFrame, train_df: pd.DataFrame) -> pd.DataFrame:
-    """Handles missing values using training data statistics to avoid leakage.
+    """Fills missing values using a defined strategy.
+
+    Fills missing values for age, aggregated features, and categorical features
+    to prepare the DataFrame for model training. Uses metrics from the training
+    set (e.g., global mean) to fill NaNs.
 
     Args:
-        df (pd.DataFrame): The main DataFrame to impute.
-        train_df (pd.DataFrame): The training portion for fill values.
+        df (pd.DataFrame): The DataFrame with missing values.
+        train_df (pd.DataFrame): The training data, used for calculating fill metrics.
 
     Returns:
         pd.DataFrame: The DataFrame with missing values handled.
     """
     print("Handling missing values...")
 
-    # Categorical features: fill with 'missing'
-    cat_features = config.CAT_FEATURES
-    for col in cat_features:
+    # Calculate global mean from training data for filling
+    global_mean = train_df[config.TARGET].mean()
+
+    # Fill age with the median
+    age_median = df[constants.COL_AGE].median()
+    df[constants.COL_AGE] = df[constants.COL_AGE].fillna(age_median)
+
+    # Fill aggregate features for "cold start" users/items (only if they exist)
+    if constants.F_USER_MEAN_RATING in df.columns:
+        df[constants.F_USER_MEAN_RATING] = df[constants.F_USER_MEAN_RATING].fillna(global_mean)
+    if constants.F_BOOK_MEAN_RATING in df.columns:
+        df[constants.F_BOOK_MEAN_RATING] = df[constants.F_BOOK_MEAN_RATING].fillna(global_mean)
+    if constants.F_AUTHOR_MEAN_RATING in df.columns:
+        df[constants.F_AUTHOR_MEAN_RATING] = df[constants.F_AUTHOR_MEAN_RATING].fillna(global_mean)
+
+    if constants.F_USER_RATINGS_COUNT in df.columns:
+        df[constants.F_USER_RATINGS_COUNT] = df[constants.F_USER_RATINGS_COUNT].fillna(0)
+    if constants.F_BOOK_RATINGS_COUNT in df.columns:
+        df[constants.F_BOOK_RATINGS_COUNT] = df[constants.F_BOOK_RATINGS_COUNT].fillna(0)
+
+    # Fill new features
+    if 'user_weighted_mean' in df.columns:
+        df['user_weighted_mean'] = df['user_weighted_mean'].fillna(global_mean)
+    if 'user_rating_std' in df.columns:
+        df['user_rating_std'] = df['user_rating_std'].fillna(0)
+    if 'user_to_read_count' in df.columns:
+        df['user_to_read_count'] = df['user_to_read_count'].fillna(0)
+
+    # Fill missing avg_rating from book_data with global mean
+    df[constants.COL_AVG_RATING] = df[constants.COL_AVG_RATING].fillna(global_mean)
+
+    # Fill genre counts with 0
+    df[constants.F_BOOK_GENRES_COUNT] = df[constants.F_BOOK_GENRES_COUNT].fillna(0)
+
+    # Fill TF-IDF features with 0
+    tfidf_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("tfidf_")]
+    for col in tfidf_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill BERT features with 0
+    bert_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("bert_")]
+    for col in bert_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill SVD features with 0
+    svd_cols = [col for col in df.columns if isinstance(col, str) and (col.startswith("user_svd_") or col.startswith("book_svd_"))]
+    for col in svd_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill genre one-hot with 0
+    genre_cols = [col for col in df.columns if isinstance(col, str) and col.startswith("genre_")]
+    for col in genre_cols:
+        df[col] = df[col].fillna(0.0)
+
+    # Fill remaining categorical features with a special value
+    for col in config.CAT_FEATURES:
         if col in df.columns:
-            df[col] = df[col].fillna(constants.MISSING_CAT_VALUE)
+            if df[col].dtype.name in ("category", "object") and df[col].isna().any():
+                df[col] = df[col].astype(str).fillna(constants.MISSING_CAT_VALUE).astype("category")
+            elif pd.api.types.is_numeric_dtype(df[col].dtype) and df[col].isna().any():
+                df[col] = df[col].fillna(constants.MISSING_NUM_VALUE)
 
-    # Numerical features: fill with median from train
-    num_features = df.select_dtypes(include=["int", "float"]).columns.tolist()
-    num_features = [col for col in num_features if col not in [config.TARGET, constants.COL_PREDICTION]]
-
-    for col in num_features:
-        if col in df.columns:
-            fill_value = train_df[col].median() if col in train_df.columns else constants.MISSING_NUM_VALUE
-            df[col] = df[col].fillna(fill_value)
-
-    # Clip aggregates to [0,10]
-    for col in [constants.F_USER_MEAN_RATING, constants.F_BOOK_MEAN_RATING, constants.F_AUTHOR_MEAN_RATING]:
-        if col in df.columns:
-            df[col] = df[col].clip(0, 10)
-
-    print("Missing values handled.")
     return df
 
+def add_nomic_features(
+    df: pd.DataFrame,
+    train_df: pd.DataFrame | None = None,
+    descriptions_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Добавляет эмбеддинги Nomic Embed Text v1.5 (через Sentence Transformers)
+    на основе описаний книг.
 
-def feature_selection(model, features, threshold=0.01) -> list:
-    """Select features based on CatBoost importance."""
-    importances = model.get_feature_importance()
-    imp_df = pd.DataFrame({'feature': features, 'importance': importances})
-    selected = imp_df[imp_df['importance'] > threshold]['feature'].tolist()
-    print(f"Selected {len(selected)} features out of {len(features)} (threshold={threshold})")
-    return selected
+    Эмбеддинги вычисляются один раз для всех уникальных книг и кэшируются на диск.
+    При повторных запусках загрузка происходит мгновенно.
 
+    Args:
+        df (pd.DataFrame): Основной DataFrame, к которому добавляются признаки.
+        train_df: Оставлен для совместимости с предыдущим API (не используется).
+        descriptions_df (pd.DataFrame): DataFrame с колонками COL_BOOK_ID и COL_DESCRIPTION.
+
+    Returns:
+        pd.DataFrame: DataFrame с добавленными колонками nomic_0 ... nomic_767.
+    """
+    print("Adding Nomic Embed Text v1.5 features (via Sentence Transformers)...")
+
+    # Путь для сохранения эмбеддингов
+    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    embeddings_path = config.MODEL_DIR / constants.NOMIC_EMBEDDINGS_FILENAME
+
+    # Маппинг book_id → описание
+    desc_map = dict(
+        zip(
+            descriptions_df[constants.COL_BOOK_ID],
+            descriptions_df[constants.COL_DESCRIPTION],
+            strict=False,
+        )
+    )
+
+    # Уникальные книги в текущем датасете
+    all_book_ids = df[constants.COL_BOOK_ID].unique()
+
+    # Загружаем или вычисляем эмбеддинги
+    if embeddings_path.exists():
+        print(f"Loading cached Nomic embeddings from {embeddings_path}")
+        embeddings_dict = joblib.load(embeddings_path)
+    else:
+        print("Loading Nomic Embed Text v1.5 model via Sentence Transformers...")
+        # Официальная поддержка nomic-embed-text-v1.5 в sentence-transformers
+        model = SentenceTransformer(
+            "nomic-ai/nomic-embed-text-v1.5",
+            trust_remote_code=True,        # обязательно для Nomic
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
+        # Важно: для корректной работы с nomic-embed-text нужно добавлять префикс
+        model.tokenizer.padding_side = "right"
+        model.tokenizer.truncation_side = "right"
+
+        print("Computing embeddings for book descriptions...")
+        embeddings_dict = {}
+
+        # Подготавливаем тексты с обязательным префиксом "search_document:"
+        texts_to_encode = []
+        book_ids_ordered = []
+
+        for book_id in tqdm(all_book_ids, desc="Preparing descriptions"):
+            desc = desc_map.get(book_id, "")
+            if not desc or not desc.strip():
+                continue
+            # Префикс критически важен для активации правильного пула эмбеддингов
+            texts_to_encode.append(f"search_document: {desc.strip()}")
+            book_ids_ordered.append(book_id)
+
+        if not texts_to_encode:
+            print("Warning: No valid descriptions found. Using zero vectors.")
+        else:
+            # Пакетное кодирование (очень быстро на GPU)
+            embeddings = model.encode(
+                texts_to_encode,
+                batch_size=8,                  # подберите под вашу видеокарту
+                show_progress_bar=True,
+                normalize_embeddings=True,      # рекомендуется для Nomic
+                convert_to_numpy=True,
+            )
+            for book_id, emb in zip(book_ids_ordered, embeddings):
+                embeddings_dict[book_id] = emb.astype(np.float32)
+
+        # Сохраняем на диск
+        joblib.dump(embeddings_dict, embeddings_path)
+        print(f"Nomic embeddings cached to {embeddings_path}")
+
+    # Применяем к основному DataFrame
+    zero_vector = np.zeros(768, dtype=np.float32)
+    embeddings_list = [
+        embeddings_dict.get(book_id, zero_vector)
+        for book_id in df[constants.COL_BOOK_ID]
+    ]
+    embeddings_array = np.stack(embeddings_list)
+
+    feature_names = [f"nomic_{i}" for i in range(768)]
+    nomic_df = pd.DataFrame(embeddings_array, columns=feature_names, index=df.index)
+
+    df_with_features = pd.concat([df.reset_index(drop=True), nomic_df], axis=1)
+
+    print(f"Successfully added 768 Nomic embedding features.")
+    return df_with_features
 
 def create_features(
     df: pd.DataFrame, book_genres_df: pd.DataFrame, descriptions_df: pd.DataFrame, include_aggregates: bool = False
 ) -> pd.DataFrame:
-    """Main feature creation pipeline.
+    """Runs the full feature engineering pipeline.
+
+    This function orchestrates the calls to add aggregate features (optional), genre
+    features, text features (TF-IDF and BERT), and handle missing values. Includes new improvements.
 
     Args:
-        df (pd.DataFrame): Merged DataFrame.
-        book_genres_df (pd.DataFrame): Book genres DataFrame.
-        descriptions_df (pd.DataFrame): Book descriptions DataFrame.
-        include_aggregates (bool): Whether to include aggregate features.
+        df (pd.DataFrame): The merged DataFrame from `data_processing`.
+        book_genres_df (pd.DataFrame): DataFrame mapping books to genres.
+        descriptions_df (pd.DataFrame): DataFrame with book descriptions.
+        include_aggregates (bool): If True, compute aggregate features. Defaults to False.
+
 
     Returns:
-        pd.DataFrame: DataFrame with all features added.
+        pd.DataFrame: The final DataFrame with all features engineered.
     """
     print("Starting feature engineering pipeline...")
     train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
@@ -465,12 +622,14 @@ def create_features(
     if include_aggregates:
         df = add_aggregate_features(df, train_df)
 
-    df = add_genre_features(df, book_genres_df, train_df)
+    df = add_to_read_features(df, train_df)
+    df = add_cf_embeddings(df, train_df)
+    df = add_genre_features(df, book_genres_df)
     df = add_text_features(df, train_df, descriptions_df)
-    df = add_book_and_author_embeddings(df, train_df, descriptions_df)
-    df = add_target_encoding_and_interactions(df, train_df)
+    #df = add_nomic_features(df, train_df, descriptions_df)
     df = handle_missing_values(df, train_df)
 
+    # Convert categorical columns to pandas 'category' dtype for LightGBM
     for col in config.CAT_FEATURES:
         if col in df.columns:
             df[col] = df[col].astype("category")

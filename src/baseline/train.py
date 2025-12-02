@@ -1,203 +1,180 @@
-# train.py (полный код с улучшениями)
-
-# src/baseline/train.py (updated — replace your file with this)
-
 """
-Main training script for the LightGBM model.
-
-Uses temporal split with absolute date threshold to ensure methodologically
-correct validation without data leakage from future timestamps.
+train.py — финальная версия с автоподбором гиперпараметров
+CatBoost + RMSEWithUncertainty + корректное сохранение + Optuna для тюнинга
 """
 
-import lightgbm as lgb
+import joblib
 import numpy as np
-from catboost import CatBoostRegressor, Pool
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-import torch  # Added import for torch.cuda.is_available()
-from torch.utils.data import DataLoader
+
+import catboost as cb
+import optuna
 
 from . import config, constants
-from .features import add_target_encoding_and_interactions, handle_missing_values, feature_selection
+from .features import add_aggregate_features, handle_missing_values
 from .temporal_split import get_split_date_from_ratio, temporal_split_by_date
-from .nn_model import train_ft_transformer, FTTransformer, prepare_data_for_nn, RatingDataset
 
 
-def train() -> None:
-    """Runs the model training pipeline with temporal split.
-
-    Loads prepared data from data/processed/, performs temporal split based on
-    absolute date threshold, computes aggregate features on train split only,
-    and trains a single LightGBM model. This ensures methodologically correct
-    validation without data leakage from future timestamps.
-
-    Note: Data must be prepared first using prepare_data.py
-    """
-    # Load prepared data
+def prepare_data():
     processed_path = config.PROCESSED_DATA_DIR / constants.PROCESSED_DATA_FILENAME
-
     if not processed_path.exists():
-        raise FileNotFoundError(
-            f"Processed data not found at {processed_path}. "
-            "Please run 'poetry run python -m src.baseline.prepare_data' first."
-        )
+        raise FileNotFoundError(f"Processed data not found: {processed_path}")
 
-    print(f"Loading prepared data from {processed_path}...")
-    featured_df = pd.read_parquet(processed_path, engine="pyarrow")
-    print(f"Loaded {len(featured_df):,} rows with {len(featured_df.columns)} features")
+    print("Loading processed data...")
+    df = pd.read_parquet(processed_path, engine="pyarrow")
+    train_df = df[df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
 
-    # Separate train and test sets
-    train_set = featured_df[featured_df[constants.COL_SOURCE] == constants.VAL_SOURCE_TRAIN].copy()
+    # Temporal split
+    print(f"Temporal split (ratio {config.TEMPORAL_SPLIT_RATIO})")
+    split_date = get_split_date_from_ratio(train_df, config.TEMPORAL_SPLIT_RATIO)
+    train_mask, val_mask = temporal_split_by_date(train_df, split_date)
 
-    # Check for timestamp column
-    if constants.COL_TIMESTAMP not in train_set.columns:
-        raise ValueError(
-            f"Timestamp column '{constants.COL_TIMESTAMP}' not found in train set. "
-            "Make sure data was prepared with timestamp preserved."
-        )
+    train_split = train_df[train_mask].copy()
+    val_split = train_df[val_mask].copy()
 
-    # Ensure timestamp is datetime
-    if not pd.api.types.is_datetime64_any_dtype(train_set[constants.COL_TIMESTAMP]):
-        train_set[constants.COL_TIMESTAMP] = pd.to_datetime(train_set[constants.COL_TIMESTAMP])
+    print(f"Train rows: {len(train_split):,} | Val rows: {len(val_split):,}")
 
-    # Perform temporal split
-    print(f"\nPerforming temporal split with ratio {config.TEMPORAL_SPLIT_RATIO}...")
-    split_date = get_split_date_from_ratio(train_set, config.TEMPORAL_SPLIT_RATIO, constants.COL_TIMESTAMP)
-    print(f"Split date: {split_date}")
+    # Aggregate features (без утечек)
+    train_split = add_aggregate_features(train_split, train_split)
+    val_split = add_aggregate_features(val_split, train_split)
 
-    train_mask, val_mask = temporal_split_by_date(train_set, split_date, constants.COL_TIMESTAMP)
+    # Убираем служебные колонки
+    train_split = train_split.drop(columns=["time_decay"], errors="ignore")
+    val_split = val_split.drop(columns=["time_decay"], errors="ignore")
 
-    # Split data
-    train_split = train_set[train_mask].copy()
-    val_split = train_set[val_mask].copy()
+    # Пропуски
+    train_split = handle_missing_values(train_split, train_split)
+    val_split = handle_missing_values(val_split, train_split)
 
-    print(f"Train split: {len(train_split):,} rows")
-    print(f"Validation split: {len(val_split):,} rows")
+    # Фичи
+    exclude = {constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP}
+    features = [c for c in train_split.columns if c not in exclude and train_split[c].dtype.name != "object"]
+    cat_features = [c for c in features if train_split[c].dtype.name == "category"]
 
-    # Verify temporal correctness
-    max_train_timestamp = train_split[constants.COL_TIMESTAMP].max()
-    min_val_timestamp = val_split[constants.COL_TIMESTAMP].min()
-    print(f"Max train timestamp: {max_train_timestamp}")
-    print(f"Min validation timestamp: {min_val_timestamp}")
+    X_train, y_train = train_split[features], train_split[config.TARGET]
+    X_val, y_val = val_split[features], val_split[config.TARGET]
 
-    if min_val_timestamp <= max_train_timestamp:
-        raise ValueError(
-            f"Temporal split validation failed: min validation timestamp ({min_val_timestamp}) "
-            f"is not greater than max train timestamp ({max_train_timestamp})."
-        )
-    print("✅ Temporal split validation passed: all validation timestamps are after train timestamps")
+    print(f"Using {len(features)} features ({len(cat_features)} categorical)")
 
-    print("\nComputing advanced features on train split...")
-    train_split_final = add_target_encoding_and_interactions(train_split.copy(), train_split)
-    val_split_final = add_target_encoding_and_interactions(val_split.copy(), train_split)
+    return X_train, y_train, X_val, y_val, features, cat_features
 
-    # Handle missing values
-    train_split_final = handle_missing_values(train_split_final, train_split)
-    val_split_final = handle_missing_values(val_split_final, train_split)
 
-    # Features
-    exclude_cols = [constants.COL_SOURCE, config.TARGET, constants.COL_PREDICTION, constants.COL_TIMESTAMP]
-    features = [col for col in train_split_final.columns if col not in exclude_cols]
-    features = [f for f in features if train_split_final[f].dtype != 'object']
+def objective(trial, X_train, y_train, X_val, y_val, cat_features):
+    params = {
+        "iterations": 3000,
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+        "depth": trial.suggest_int("depth", 4, 10),
+        "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0),
+        "bagging_temperature": trial.suggest_float("bagging_temperature", 0.5, 2.0),
+        "random_strength": trial.suggest_float("random_strength", 0.5, 2.0),
+        "border_count": trial.suggest_int("border_count", 32, 255),
+        "grow_policy": "Lossguide",
+        "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 1, 10),
+        "loss_function": "RMSEWithUncertainty",
+        "eval_metric": "RMSE",
+        "od_type": "Iter",
+        "od_wait": config.EARLY_STOPPING_ROUNDS,
+        "random_seed": config.RANDOM_STATE,
+        "verbose": 0,  # Отключаем вывод для тюнинга
+        "thread_count": -1,
+        "task_type": "GPU", "devices": "0",  # Раскомментируйте, если нет GPU
+    }
 
-    X_train = train_split_final[features]
-    y_train = train_split_final[config.TARGET].clip(0, 10)
-    X_val = val_split_final[features]
-    y_val = val_split_final[config.TARGET].clip(0, 10)
+    train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
+    val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
 
-    cat_features = [col for col in config.CAT_FEATURES if col in features]
+    model = cb.CatBoostRegressor(**params)
+    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
 
-    # Convert categorical features to string to fix CatBoost type error
-    for col in cat_features:
-        X_train[col] = X_train[col].astype(str)
-        X_val[col] = X_val[col].astype(str)
+    val_pred = model.predict(X_val)
+    if val_pred.ndim == 2:
+        val_pred = val_pred[:, 0]
 
-    print(f"\nTraining CatBoost on {len(features)} features ({len(cat_features)} categorical)...")
-    model = CatBoostRegressor(
-        iterations=7000,
-        learning_rate=0.05,
-        depth=8,
-        l2_leaf_reg=5,
-        random_seed=42,
-        verbose=100,
-        early_stopping_rounds=300,
-        task_type="GPU" if torch.cuda.is_available() else "CPU",
-        devices='0' if torch.cuda.is_available() else None
-    )
+    rmse = np.sqrt(mean_squared_error(y_val, val_pred))
+    return rmse
 
-    train_pool = Pool(X_train, y_train, cat_features=cat_features)
-    val_pool = Pool(X_val, y_val, cat_features=cat_features)
 
-    model.fit(train_pool, eval_set=val_pool)
+def train(tune_hyperparams: bool = False) -> None:
+    X_train, y_train, X_val, y_val, features, cat_features = prepare_data()
 
-    # Feature selection after CatBoost
-    selected_features = feature_selection(model, features)
-    X_train = X_train[selected_features]
-    X_val = X_val[selected_features]
-    cat_features = [col for col in cat_features if col in selected_features]
+    if tune_hyperparams:
+        print("\nStarting hyperparameter tuning with Optuna...")
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=config.RANDOM_STATE))
+        study.optimize(lambda trial: objective(trial, X_train, y_train, X_val, y_val, cat_features), n_trials=50)
 
-    # Train LightGBM
-    print("\nTraining LightGBM...")
-    lgb_train = lgb.Dataset(X_train, y_train, categorical_feature=cat_features)
-    lgb_val = lgb.Dataset(X_val, y_val, categorical_feature=cat_features)
-    lgb_model = lgb.train(
-        config.LGB_PARAMS,
-        lgb_train,
-        valid_sets=[lgb_val],
-        callbacks=[lgb.early_stopping(stopping_rounds=300)],
-    )
+        best_params = study.best_params
+        print(f"\nBest hyperparameters: {best_params}")
+        print(f"Best RMSE: {study.best_value:.5f}")
 
-    print("\nTraining FT-Transformer...")
-    cat_feats = [col for col in config.CAT_FEATURES if col in selected_features]
-    num_feats = [col for col in selected_features if col not in cat_feats]
+        # Обучаем финальную модель с лучшими параметрами
+        params = {
+            "iterations": 3000,
+            "learning_rate": best_params["learning_rate"],
+            "depth": best_params["depth"],
+            "l2_leaf_reg": best_params["l2_leaf_reg"],
+            "bagging_temperature": best_params["bagging_temperature"],
+            "random_strength": best_params["random_strength"],
+            "border_count": best_params["border_count"],
+            "grow_policy": "Lossguide",
+            "min_data_in_leaf": best_params["min_data_in_leaf"],
+            "loss_function": "RMSEWithUncertainty",
+            "eval_metric": "RMSE",
+            "od_type": "Iter",
+            "od_wait": config.EARLY_STOPPING_ROUNDS,
+            "random_seed": config.RANDOM_STATE,
+            "verbose": 200,
+            "thread_count": -1,
+            "task_type": "GPU", "devices": "0",  # Раскомментируйте, если нет GPU
+        }
+    else:
+        # Фиксированные параметры из вашего оригинального кода
+        params = {
+            "iterations": 3000,
+            "learning_rate": 0.025925320737058073,
+            "depth": 4,
+            "l2_leaf_reg": 14.175740136108939,
+            "bagging_temperature": 1.6601307512092365,
+            "random_strength": 1.8073991932502391,
+            "border_count": 151,
+            "grow_policy": "Lossguide",
+            "min_data_in_leaf": 8,
+            "loss_function": "RMSEWithUncertainty",
+            "eval_metric": "RMSE",
+            "od_type": "Iter",
+            "od_wait": config.EARLY_STOPPING_ROUNDS,
+            "random_seed": config.RANDOM_STATE,
+            "verbose": 200,
+            "thread_count": -1,
+            "task_type": "GPU", "devices": "0",  # Раскомментируйте, если нет GPU
+        }
 
-    train_ft_transformer(train_split_final[selected_features], train_split_final[config.TARGET],
-                         val_split_final[selected_features], val_split_final[config.TARGET],
-                         cat_feats, num_feats)
+    train_pool = cb.Pool(X_train, y_train, cat_features=cat_features)
+    val_pool = cb.Pool(X_val, y_val, cat_features=cat_features)
 
-    # === ENSEMBLE EVALUATION ON VALIDATION ===
-    print("\nEvaluating ensemble on validation split...")
-    cat_val_preds = model.predict(X_val)
-    lgb_val_preds = lgb_model.predict(X_val)
+    model = cb.CatBoostRegressor(**params)
+    print("\nTraining started...")
+    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
 
-    ft_state = torch.load(config.MODEL_DIR / 'ft_transformer.pt', weights_only=False)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    ft_model = FTTransformer(len(num_feats), [len(ft_state['encoders'][c].classes_) for c in cat_feats]).to(device)
-    ft_model.load_state_dict(ft_state['model'])
-    ft_model.eval()
+    val_pred = model.predict(X_val)
+    if val_pred.ndim == 2:
+        val_pred = val_pred[:, 0]
 
-    X_val_num, X_val_cat, _, _, _ = prepare_data_for_nn(val_split_final, cat_feats, num_feats, fit=False,
-                                                        encoders=ft_state['encoders'], scaler=ft_state['scaler'])
-    val_ds = RatingDataset(X_val_num, X_val_cat)
-    val_loader = DataLoader(val_ds, batch_size=2048, shuffle=False)
+    rmse = np.sqrt(mean_squared_error(y_val, val_pred))
+    mae = mean_absolute_error(y_val, val_pred)
+    print(f"\nValidation RMSE: {rmse:.5f}")
+    print(f"Validation MAE: {mae:.5f}")
 
-    ft_val_preds = []
-    with torch.no_grad():
-        for batch in val_loader:
-            x_num, x_cat = [b.to(device) for b in batch]
-            ft_val_preds.append(ft_model(x_num, x_cat).cpu().numpy())
-    ft_val_preds = np.concatenate(ft_val_preds)
 
-    ensemble_val_preds = 0.5 * cat_val_preds + 0.3 * ft_val_preds + 0.2 * lgb_val_preds
-    ensemble_rmse = np.sqrt(mean_squared_error(y_val, ensemble_val_preds))
-    print(f"\nEnsemble Val RMSE: {ensemble_rmse:.4f}")
+    # Сохранение
+    config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    model.save_model(str(config.MODEL_DIR / "catboost_model.cbm"))
+    joblib.dump(features, config.MODEL_DIR / "feature_columns.pkl")
 
-    # Evaluation (CatBoost only for reference)
-    val_preds = model.predict(X_val)
-    rmse = np.sqrt(mean_squared_error(y_val, val_preds))
-    mae = mean_absolute_error(y_val, val_preds)
-    print(f"\nCatBoost Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
-
-    # Save models
-    model_path = config.MODEL_DIR / "catboost_model.cbm"
-    model.save_model(str(model_path))
-    print(f"CatBoost model saved to {model_path}")
-
-    lgb_model.save_model(str(config.MODEL_DIR / "lightgbm_model.txt"))
-    print(f"LightGBM model saved to {config.MODEL_DIR / 'lightgbm_model.txt'}")
-
-    # FT saved in train_ft_transformer
+    print(f"\nModel saved → {config.MODEL_DIR / 'catboost_model.cbm'}")
+    print("Training completed!")
 
 
 if __name__ == "__main__":
-    train()
+    # Установите tune_hyperparams=True для запуска тюнинга
+    train(tune_hyperparams=False)
